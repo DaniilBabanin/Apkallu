@@ -1,0 +1,14 @@
+# secrets / env
+*.env
+.env*
+!.env.example
+
+# runtime / data — never publish
+**/results/
+**/queue-out/
+*.log
+
+# python / node junk
+__pycache__/
+*.pyc
+node_modules/

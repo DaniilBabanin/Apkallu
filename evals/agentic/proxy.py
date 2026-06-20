@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""proxy.py — host-side auth-injecting reverse proxy that keeps the inference API key OFF the VM.
+
+Provider-agnostic: the default upstream is your provider (${LLM_UPSTREAM_HOST}), but set LLM_UPSTREAM_HOST to point
+at any OpenAI-compatible endpoint and LLM_API_KEY (or LLM_API_KEY) to supply the key.
+
+The VM needs to *use* your provider inference but must never *possess* the key (open egress makes anything
+in the VM exfiltratable — PLAN.md security model, D-023). This proxy runs on the host, reads the
+key from the gitignored `.secrets.env`, and forwards inference requests to `your inference endpoint`
+with the real `Authorization` header injected. The VM points OpenHands' `LLM_BASE_URL` at this proxy
+over an SSH `-R` reverse tunnel (loopback only — no nwfilter hole, works in any egress profile), so
+the guest connects to `http://127.0.0.1:PORT/openai/v1` with a *dummy* key that this proxy discards.
+
+Residual (honest framing, same precision as D-025): a hostile VM can *spend* the disposable key's
+quota through the open tunnel, but cannot read the key value. The key is disposable + spend-capped.
+
+Listens loopback by default (the SSH `-R` endpoint is the host's 127.0.0.1). Stdlib only.
+"""
+import argparse
+import http.client
+import os
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+UPSTREAM = os.environ.get("LLM_UPSTREAM_HOST") or "${LLM_UPSTREAM_HOST}"  # OpenAI-compatible host; path is kept
+# Headers we must not blind-copy: hop-by-hop (RFC 7230 6.1) + ones we recompute/override.
+STRIP = {"host", "authorization", "content-length", "connection", "keep-alive",
+         "transfer-encoding", "proxy-connection", "te", "trailer", "upgrade"}
+KEY = None
+# Key var names tried in order, env first then the secrets file. LLM_API_KEY kept for back-compat.
+KEY_VARS = ("LLM_API_KEY", "LLM_API_KEY")
+# your provider's edge 403s the default Python http.client UA (the run_eval.py gotcha — and THIS proxy is
+# exactly that raw-HTTP path). LiteLLM sends its own UA which passes; we preserve it and only supply
+# this fallback if a client sent none.
+UA_FALLBACK = "Mozilla/5.0 (X11; Linux x86_64) remote-proxy/1"
+
+
+def _read_key(path):
+    # env wins (CI / container use); otherwise scan the gitignored secrets file.
+    for var in KEY_VARS:
+        if os.environ.get(var):
+            return os.environ[var]
+    try:
+        lines = open(path).read().splitlines()
+    except FileNotFoundError:
+        lines = []
+    for var in KEY_VARS:
+        for line in lines:
+            line = line.strip()
+            if line.startswith("export "):
+                line = line[len("export "):].strip()
+            if line.startswith(var + "="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    raise SystemExit(f"no API key ({' / '.join(KEY_VARS)}) in env or {path}")
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    # Never log headers or bodies (they would log the injected key). Only method/path/status.
+    def log_message(self, fmt, *args):  # noqa: A003 (override)
+        sys.stderr.write("remote-proxy %s\n" % (fmt % args))
+
+    def _forward(self, method):
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else b""
+        headers = {k: v for k, v in self.headers.items() if k.lower() not in STRIP}
+        headers["Authorization"] = f"Bearer {KEY}"        # discard the VM's dummy, inject the real key
+        headers.setdefault("User-Agent", UA_FALLBACK)
+        try:
+            up = http.client.HTTPSConnection(UPSTREAM, timeout=300)
+            up.request(method, self.path, body=body, headers=headers)  # http.client sets Host + Content-Length
+            resp = up.getresponse()
+            data = resp.read()                            # stream=False -> one JSON blob; read fully
+        except Exception as e:                            # noqa: BLE001 — surface upstream failures as 502
+            self.send_response(502)
+            self.send_header("Content-Type", "text/plain")
+            msg = f"remote-proxy upstream error: {e}".encode()
+            self.send_header("Content-Length", str(len(msg)))
+            self.end_headers()
+            self.wfile.write(msg)
+            return
+        self.send_response(resp.status)
+        for k, v in resp.getheaders():
+            if k.lower() in STRIP:
+                continue
+            self.send_header(k, v)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_POST(self):
+        self._forward("POST")
+
+    def do_GET(self):
+        self._forward("GET")
+
+
+def main():
+    global KEY
+    here = os.path.dirname(os.path.abspath(__file__))
+    p = argparse.ArgumentParser(description="auth-injecting reverse proxy, key off the VM (default upstream: your provider)")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=18081)
+    p.add_argument("--secrets", default=os.path.join(here, ".secrets.env"))
+    a = p.parse_args()
+    KEY = _read_key(a.secrets)
+    srv = ThreadingHTTPServer((a.host, a.port), Handler)
+    sys.stderr.write(f"remote-proxy listening on {a.host}:{a.port} -> https://{UPSTREAM}\n")
+    srv.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
