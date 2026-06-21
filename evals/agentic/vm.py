@@ -56,9 +56,10 @@ SSH_USER = "agent"
 HERE = os.path.dirname(os.path.abspath(__file__))
 SSH_KEY = os.path.join(HERE, "ssh", "agent_id_ed25519")
 PROXY_PY = os.path.join(HERE, "egress_proxy.py")
+_UPSTREAM = os.environ.get("LLM_UPSTREAM_HOST")  # added to the allowlist only when set; the local lane needs none
 ALLOWLIST = "pypi.org,files.pythonhosted.org,github.com,codeload.github.com," \
-            "objects.githubusercontent.com,raw.githubusercontent.com," \
-            + (os.environ.get("LLM_UPSTREAM_HOST") or "${LLM_UPSTREAM_HOST}")  # inference host (restricted profile)
+            "objects.githubusercontent.com,raw.githubusercontent.com" \
+            + ("," + _UPSTREAM if _UPSTREAM else "")  # inference host (restricted profile)
 
 SSH_OPTS = [
     "-i", SSH_KEY, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",

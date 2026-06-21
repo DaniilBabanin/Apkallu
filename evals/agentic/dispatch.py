@@ -55,7 +55,7 @@ def run_one(job, ddir):
     rec = {"name": name, "status": None, "outdir": None}
     try:
         cmd = [sys.executable, RUN_SESSION, "--name", name, "--repo", job["repo"],
-               "--model", job.get("model") or os.environ.get("LLM_MODEL") or "<model-slug>",
+               "--model", job.get("model") or os.environ.get("LLM_MODEL"),
                "--timeout", str(job.get("timeout", 1800)),
                "--max-iterations", str(job.get("max_iterations", 200))]
         if job.get("task_file"):
@@ -117,6 +117,9 @@ def main():
     names = [j["name"] for j in jobs]
     if len(set(names)) != len(names):
         raise SystemExit("job names must be unique (each maps to a distinct VM + results dir)")
+    no_model = [j["name"] for j in jobs if not (j.get("model") or os.environ.get("LLM_MODEL"))]
+    if no_model:
+        raise SystemExit(f'set a per-job "model" or LLM_MODEL for: {", ".join(no_model)} (see .env.example)')
 
     cap = a.max_concurrent or ram_cap()
     conc = min(len(jobs), cap)

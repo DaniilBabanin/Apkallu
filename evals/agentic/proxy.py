@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """proxy.py — host-side auth-injecting reverse proxy that keeps the inference API key OFF the VM.
 
-Provider-agnostic: the default upstream is your provider (${LLM_UPSTREAM_HOST}), but set LLM_UPSTREAM_HOST to point
-at any OpenAI-compatible endpoint and LLM_API_KEY (or LLM_API_KEY) to supply the key.
+Provider-agnostic: set LLM_UPSTREAM_HOST to any OpenAI-compatible endpoint and LLM_API_KEY to
+supply the key. Both are required — there is no default upstream (see .env.example).
 
 The VM needs to *use* your provider inference but must never *possess* the key (open egress makes anything
 in the VM exfiltratable — PLAN.md security model, D-023). This proxy runs on the host, reads the
@@ -22,13 +22,13 @@ import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-UPSTREAM = os.environ.get("LLM_UPSTREAM_HOST") or "${LLM_UPSTREAM_HOST}"  # OpenAI-compatible host; path is kept
+UPSTREAM = os.environ.get("LLM_UPSTREAM_HOST")  # OpenAI-compatible host; path is kept. Required — checked in main().
 # Headers we must not blind-copy: hop-by-hop (RFC 7230 6.1) + ones we recompute/override.
 STRIP = {"host", "authorization", "content-length", "connection", "keep-alive",
          "transfer-encoding", "proxy-connection", "te", "trailer", "upgrade"}
 KEY = None
-# Key var names tried in order, env first then the secrets file. LLM_API_KEY kept for back-compat.
-KEY_VARS = ("LLM_API_KEY", "LLM_API_KEY")
+# Key var names tried in order, env first then the secrets file.
+KEY_VARS = ("LLM_API_KEY",)
 # your provider's edge 403s the default Python http.client UA (the run_eval.py gotcha — and THIS proxy is
 # exactly that raw-HTTP path). LiteLLM sends its own UA which passes; we preserve it and only supply
 # this fallback if a client sent none.
@@ -99,11 +99,13 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     global KEY
     here = os.path.dirname(os.path.abspath(__file__))
-    p = argparse.ArgumentParser(description="auth-injecting reverse proxy, key off the VM (default upstream: your provider)")
+    p = argparse.ArgumentParser(description="auth-injecting reverse proxy, key off the VM (set LLM_UPSTREAM_HOST)")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=18081)
     p.add_argument("--secrets", default=os.path.join(here, ".secrets.env"))
     a = p.parse_args()
+    if not UPSTREAM:
+        raise SystemExit("set LLM_UPSTREAM_HOST to your OpenAI-compatible upstream host (see .env.example)")
     KEY = _read_key(a.secrets)
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     sys.stderr.write(f"remote-proxy listening on {a.host}:{a.port} -> https://{UPSTREAM}\n")

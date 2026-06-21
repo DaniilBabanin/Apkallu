@@ -18,7 +18,7 @@ import time
 import vm  # reuse SSH key/opts, IP discovery, VM lifecycle
 
 PORT = 18081  # host proxy + the VM-side SSH -R loopback endpoint
-MODELS = (os.environ.get("LLM_SMOKE_MODELS") or "<model-slug>,<model-slug>").split(",")
+MODELS = [m.strip() for m in (os.environ.get("LLM_SMOKE_MODELS") or "").split(",") if m.strip()]
 PROXY_PY = os.path.join(vm.HERE, "proxy.py")
 AGENT_PY = os.path.join(vm.HERE, "smoke_agent.py")
 
@@ -103,6 +103,8 @@ def main():
     ap.add_argument("--name", default="smoke")
     ap.add_argument("--keep", action="store_true")
     a = ap.parse_args()
+    if not MODELS:
+        raise SystemExit("set LLM_SMOKE_MODELS=slug1,slug2 (see .env.example)")
     proxy = ensure_proxy()
     ip = ensure_up(a.name)
     # copy the in-VM agent driver in (host-initiated, no host FS mount)
