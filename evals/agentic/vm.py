@@ -55,6 +55,7 @@ GW = "192.168.122.1"          # libvirt default-net gateway == this host == the 
 PROXY_PORT = 18080            # host allowlist proxy (restricted profile)
 SSH_USER = "agent"
 HERE = os.path.dirname(os.path.abspath(__file__))
+os.makedirs(os.path.join(HERE, "build"), exist_ok=True)  # runtime logs/locks live here; build-image.sh isn't a prerequisite
 SSH_KEY = os.path.join(HERE, "ssh", "agent_id_ed25519")
 PROXY_PY = os.path.join(HERE, "egress_proxy.py")
 # inference host (LLM_BASE_URL host wins, else LLM_UPSTREAM_HOST); added to the allowlist only when
@@ -238,6 +239,8 @@ def ssh(name, command, check=False, capture=True, timeout=None):
 
 
 def up(name, egress="open", mem=4096, vcpus=4):
+    if not os.access(SSH_KEY, os.R_OK):  # fail fast: a missing key only surfaces as a 3-min "SSH never came up"
+        raise SystemExit(f"missing VM ssh key {SSH_KEY} — run evals/agentic/setup.sh")
     if egress == "restricted":
         _ensure_proxy()
     # Serialize the boot-critical section across concurrent dispatcher children (a build phase). The

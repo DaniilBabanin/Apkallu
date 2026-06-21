@@ -47,7 +47,10 @@ ssh_agent() {
     "agent@$SSH_HOST" "$@"
 }
 
-[ -r "$SSH_KEY" ] || die "missing SSH key $SSH_KEY (run ssh-keygen first)"
+# auto-generate the VM key if absent — the matching .pub is baked into this image below, so
+# generating here always yields a consistent pair (unlike setup.sh against a pre-built image).
+[ -r "$SSH_KEY" ] || { mkdir -p "$(dirname "$SSH_KEY")"; chmod 700 "$(dirname "$SSH_KEY")"; \
+  ssh-keygen -t ed25519 -N "" -C agent@agentic -f "$SSH_KEY" >/dev/null && log "generated $SSH_KEY"; }
 command -v qemu-system-x86_64 >/dev/null || die "qemu-system-x86_64 not found"
 command -v xorriso >/dev/null || die "xorriso not found"
 mkdir -p "$BUILD"

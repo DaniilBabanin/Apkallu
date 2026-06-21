@@ -15,3 +15,10 @@ node_modules/
 
 # generated knowledge graph — regenerate locally with graphify, not maintained in-repo
 graphify-out/
+
+# vm ssh keypair — local credential, pairs with the golden image
+evals/agentic/ssh/
+
+# vm/proxy runtime + generated smoke report
+evals/agentic/build/
+evals/agentic/smoke.md
