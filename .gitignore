@@ -12,3 +12,6 @@
 __pycache__/
 *.pyc
 node_modules/
+
+# generated knowledge graph — regenerate locally with graphify, not maintained in-repo
+graphify-out/
