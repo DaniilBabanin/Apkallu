@@ -83,7 +83,7 @@ The host runs only the Python 3 standard library — there are no host pip requi
 The agent runtime (OpenHands) is installed *inside* the VM image by `build-image.sh`.
 
 ## Setup
-1. `cp .env.example .env` and fill in your inference endpoint, key, and model.
+1. `cp .env.example .env` and set `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL`.
 2. Configure the local sandbox and check deps: `local/sandbox-setup.sh install`.
 3. Build the golden VM image (one-time per machine): `evals/agentic/build-image.sh`.
 4. Smoke-test the VM lane: `evals/agentic/smoke.py`.
@@ -95,7 +95,16 @@ The agent runtime (OpenHands) is installed *inside* the VM image by `build-image
 
 ## Inference
 All inference is provider-agnostic via env vars (see `.env.example`) — nothing is hardcoded to a
-vendor. The host-side proxy injects your API key so it never enters the VM.
+vendor. Point Apkallu at any OpenAI-compatible endpoint:
+
+- **`LLM_BASE_URL`** — full upstream URL, `scheme://host[:port]/path` (e.g.
+  `https://api.example.com/openai/v1` or `http://localhost:11434/v1`). The host-side proxy remaps the
+  request path, so endpoints on `/v1`, `/api/v1`, etc. all work — not just `/openai/v1`.
+  (`LLM_UPSTREAM_HOST` is kept as a legacy host-only alternative: implies `https` + `/openai/v1`.)
+- **`LLM_API_KEY`** — credential for that endpoint (may also live in `evals/agentic/.secrets.env`).
+- **`LLM_MODEL`** — default model slug (override per run with `--model`).
+
+The host-side proxy injects your API key so it never enters the VM.
 
 ## License
 Apache-2.0.
