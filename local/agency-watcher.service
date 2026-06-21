@@ -1,0 +1,16 @@
+[Unit]
+Description=agency watcher — loop health monitor (one cycle)
+# Network only matters for ntfy push; watcher degrades gracefully without it.
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# __REPO_DIR__ is substituted with this checkout's path by `local/watcher.sh install`.
+WorkingDirectory=__REPO_DIR__
+ExecStart=__REPO_DIR__/local/watcher.sh run
+# Optional config (NTFY_TOPIC etc.) — missing file is fine ("-" prefix).
+EnvironmentFile=-%h/.config/agency/watcher.env
+# Keep it cheap and contained.
+Nice=10
+TimeoutStartSec=600

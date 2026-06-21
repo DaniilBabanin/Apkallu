@@ -84,5 +84,3 @@ printf '  escalations raised: %s  (D-NNN asked in window)\n' "${escalations:-0}"
 echo
 echo "QUEUE"
 printf '  decisions on record: %s\n' "${decisions_total:-0}"
-echo
-echo "interpret with /retro"

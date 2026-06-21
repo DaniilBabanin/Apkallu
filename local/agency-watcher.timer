@@ -1,0 +1,12 @@
+[Unit]
+Description=agency watcher — every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+# Spread load a little; exact cadence doesn't matter for a health check.
+RandomizedDelaySec=60
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -301,8 +301,10 @@ do_install() {
   unit_src="$REPO_DIR/local"
   dst="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
   mkdir -p "$dst"
-  ln -sf "$unit_src/agency-watcher.service" "$dst/agency-watcher.service"
-  ln -sf "$unit_src/agency-watcher.timer"   "$dst/agency-watcher.timer"
+  # Render units with this checkout's path (clone-anywhere: the shipped files carry no
+  # hardcoded path, so we substitute __REPO_DIR__ at install time instead of symlinking).
+  sed "s|__REPO_DIR__|$REPO_DIR|g" "$unit_src/agency-watcher.service" >"$dst/agency-watcher.service"
+  sed "s|__REPO_DIR__|$REPO_DIR|g" "$unit_src/agency-watcher.timer"   >"$dst/agency-watcher.timer"
   systemctl --user daemon-reload
   systemctl --user enable --now agency-watcher.timer
   echo "[watcher] installed + enabled. Set NTFY_TOPIC in ~/.config/agency/watcher.env to get pings."
