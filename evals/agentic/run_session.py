@@ -63,14 +63,37 @@ def _scp_out(ip, remote_path, local_path):
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def _extract_final(traj_path):
+    """Pull the agent's last substantive message — the answer/verdict — out of a trajectory,
+    handling both serializations we see (native `llm_message.content[].text` and
+    OpenHands `action.message`). Returns (full_text, one_line_headline)."""
+    import re
+    with open(traj_path) as f:
+        t = json.load(f)
+    texts = []
+    for ev in t if isinstance(t, list) else []:
+        if ev.get("source") != "agent":
+            continue
+        msg = (ev.get("action") or {}).get("message")
+        if isinstance(msg, str) and msg.strip():
+            texts.append(msg)
+        for c in ((ev.get("llm_message") or {}).get("content") or []):
+            if isinstance(c, dict) and c.get("type") == "text" and c.get("text", "").strip():
+                texts.append(c["text"])
+    final = texts[-1] if texts else ""
+    m = re.search(r"VERDICT[:* ].{0,100}", final)
+    headline = (m.group(0) if m else final[:120]).replace("\n", " ").strip(" *#")
+    return final, headline
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", required=True, help="host dir copied into the VM as the workspace")
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--task")
     g.add_argument("--task-file")
-    ap.add_argument("--model", default=os.environ.get("LLM_MODEL") or "<model-slug>",
-                    help="model slug (default lane); override default via LLM_MODEL")
+    ap.add_argument("--model", default=os.environ.get("LLM_MODEL"),
+                    help="model slug for the remote lane; defaults to $LLM_MODEL")
     ap.add_argument("--local-model", help="a local server model slug; run via host a local server over ssh -R "
                     "(local lane, no your provider proxy). Tools still run in the VM sandbox.")
     ap.add_argument("--verify-cmd", help="run in the workspace after the session (informative; not gating)")
@@ -78,12 +101,17 @@ def main():
     ap.add_argument("--max-iterations", type=int, default=200)
     ap.add_argument("--name", default="sess")
     ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--save-bundle", action="store_true",
+                    help="also save repo.bundle (full git history, ~20MB/run). Off by default — "
+                         "session.patch + meta already capture the change; the bundle is replay-only bulk.")
     a = ap.parse_args()
 
     # local lane = a local server model on the host GPU, reached over an ssh -R tunnel; the agent's
     # tools still run in the VM sandbox. your provider lane (default) = remote open model via the key-off-VM
     # auth proxy. a local server is keyless (/v1); the proxy serves /openai/v1.
     local = a.local_model is not None
+    if not local and not a.model:
+        raise SystemExit("set --model or LLM_MODEL for the remote lane (see .env.example)")
     model = a.local_model if local else a.model
     llm_port = 1234 if local else PORT
 
@@ -146,7 +174,12 @@ def main():
                                timeout=host_timeout)
             log = p.stdout
         except subprocess.TimeoutExpired as e:
-            log = (e.output or "") + "\n[run_session] HOST BACKSTOP TIMEOUT — killing remote session"
+            # TimeoutExpired.output is bytes even with text=True (partial output isn't decoded on the
+            # timeout path), so coerce before concatenating — else "can't concat str to bytes".
+            out = e.output or ""
+            if isinstance(out, (bytes, bytearray)):
+                out = out.decode("utf-8", "replace")
+            log = out + "\n[run_session] HOST BACKSTOP TIMEOUT — killing remote session"
             meta["extract_errors"].append("host_backstop_timeout")
             _ssh(ip, "pkill -f session_agent.py || true", timeout=30)  # VM-side kill (safe)
         with open(os.path.join(outdir, "agent.log"), "w") as f:
@@ -169,12 +202,23 @@ def main():
             "cd ~/workspace && git rev-list --count agent-session").stdout or "0").strip() or 0))
         meta["diffstat"] = step("diffstat", lambda: (_ssh(ip,
             f"cd ~/workspace && git diff {meta.get('baseline_sha')} HEAD --stat").stdout or "").strip())
-        step("repo_bundle", lambda: (_ssh(ip, "cd ~/workspace && git bundle create /tmp/repo.bundle --all"),
-                                     _scp_out(ip, "/tmp/repo.bundle", os.path.join(outdir, "repo.bundle"))))
+        if a.save_bundle:
+            step("repo_bundle", lambda: (_ssh(ip, "cd ~/workspace && git bundle create /tmp/repo.bundle --all"),
+                                         _scp_out(ip, "/tmp/repo.bundle", os.path.join(outdir, "repo.bundle"))))
         step("session_patch", lambda: open(os.path.join(outdir, "session.patch"), "w").write(
             _ssh(ip, f"cd ~/workspace && git diff {meta.get('baseline_sha')} HEAD", timeout=120).stdout or ""))
         step("trajectory", lambda: _scp_out(ip, "/home/agent/out/trajectory.json",
                                             os.path.join(outdir, "trajectory.json")))
+
+        def _save_final():
+            tp = os.path.join(outdir, "trajectory.json")
+            if not os.path.exists(tp):
+                return
+            final, headline = _extract_final(tp)
+            if final:
+                open(os.path.join(outdir, "final.md"), "w").write(final)
+                meta["final_headline"] = headline
+        step("final", _save_final)
         rj = step("result_json", lambda: _scp_out(ip, "/home/agent/out/result.json",
                                                   os.path.join(outdir, "result.json")))
         # isolation invariant (light): no host FS passthrough mount visible in the VM
@@ -207,10 +251,18 @@ def main():
                 proxy.terminate()
 
     print(f"[run_session] status={meta.get('status')} reason={meta.get('reason')} -> {outdir}")
-    for fn in ("meta.json", "session.patch", "trajectory.json", "repo.bundle", "result.json", "agent.log"):
+    for fn in ("meta.json", "final.md", "session.patch", "trajectory.json", "result.json", "agent.log"):
         p = os.path.join(outdir, fn)
         print(f"  {'OK ' if os.path.exists(p) else 'MISS'} {fn}"
               + (f" ({os.path.getsize(p)}B)" if os.path.exists(p) else ""))
+
+    # Refresh the cross-run index so learnings stay discoverable without anyone remembering to
+    # run it. Runs after every session (dispatch.py calls this per job). Never fail the session on it.
+    try:
+        import index
+        index.main()
+    except Exception as e:   # noqa: BLE001
+        print(f"[run_session] index refresh skipped: {e}")
     sys.exit(0 if meta.get("status") in ("complete", "partial") else 1)
 
 

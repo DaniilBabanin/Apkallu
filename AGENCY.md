@@ -95,6 +95,20 @@ server instead.
   let it finish; or after killing it run `virsh destroy agentic-<name>` for that exact name, then
   confirm with `virsh list --all | grep agentic`. Apkallu's VMs are always named `agentic-*`.
 
+## Dispatch a greenfield / external project to the VMs (the lane is settled — DON'T re-derive it)
+Trust this; do **not** re-grep `vm.py`/`run_session.py`/`proxy.py` to "check" the lane each run:
+- `dispatch.py` owns the egress proxy (key from `LLM_API_KEY` / `evals/agentic/.secrets.env`),
+  RAM-caps concurrency, reaps every `agentic-*`. Base image
+  `/var/lib/libvirt/images/agentic/base.qcow2` (pool `agentic`, Ubuntu Noble → **py3.12**, which
+  resolves `litellm[proxy]` cleanly). No need to verify image/pool/kvm/key.
+- **Recipe:** (1) `git init` the project + commit a baseline — rsync ships the *worktree*, so first
+  `rm -rf .venv *.egg-info __pycache__ .pytest_cache` (NOT auto-excluded; they bloat/poison the copy).
+  (2) One task-file per unit; units own **disjoint paths** so `session.patch`es merge clean.
+  (3) `jobs.json` = `[{name,repo(abs),task_file(abs),model,timeout,verify_cmd}]`.
+  (4) `python3 evals/agentic/dispatch.py --jobs jobs.json --max-concurrent 5`.
+  (5) Review each returned `session.patch` + run its `verify_cmd` before merging.
+- Slow/deep models → `timeout: 3600`, keep units small.
+
 ## GUPP — coordinate through git, not an LLM's judgment
 
 The cascade's coordination state lives in **git refs**, never in a model's opinion of "is this ready
