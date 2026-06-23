@@ -16,6 +16,9 @@ node_modules/
 # generated knowledge graph — regenerate locally with graphify, not maintained in-repo
 graphify-out/
 
+# generated repo index — deterministic, rewritten each digest cycle by local/map-gen.sh
+director/MAP.md
+
 # vm ssh keypair — local credential, pairs with the golden image
 evals/agentic/ssh/
 
