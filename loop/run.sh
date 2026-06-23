@@ -160,6 +160,41 @@ run_gate_logged() {
   return "${PIPESTATUS[0]}"
 }
 
+# Plan 2 — route the previous gate failure's tail into the next attempt's prompt.
+# Gate logs (.cascade/logs/gate-*.log, written by run_gate_logged above) are gitignored, so they
+# survive the gate-fail revert (`git checkout` + `git clean --exclude=NOTES.md`). On a failure the
+# worktree is reverted and the SAME task is re-picked cold next iteration; without this the next
+# worker rediscovers the identical failure from scratch (wasted quota). These read from DISK, not a
+# loop variable, because cascade runs one worker per process — a variable wouldn't survive.
+GATE_TAIL_LINES="${GATE_TAIL_LINES:-25}"
+
+# Capped tail of the MOST-RECENT gate log under $1 (default .cascade/logs), but ONLY when that log
+# is a FAILURE — a passing log (last line contains 'RESULT: PASS') means the previous task closed
+# and a different task is up, so there is nothing to route. Empty output (rc 0) when no log exists
+# or the latest one passed. Uses a glob (not `ls`, which trips SC2012 at the gate's -S style);
+# filenames are gate-<UTC-stamp>-<pid>.log, so a lexical sort is chronological.
+latest_gate_failure_tail() {
+  local dir="${1:-.cascade/logs}" log
+  local logs=("$dir"/gate-*.log)
+  # No match -> the array holds the un-expanded pattern (a path that doesn't exist).
+  [ -e "${logs[0]}" ] || return 0
+  log="$(printf '%s\n' "${logs[@]}" | sort | tail -n1)"
+  if tail -n 1 "$log" 2>/dev/null | grep -q 'RESULT: PASS'; then
+    return 0
+  fi
+  tail -n "$GATE_TAIL_LINES" "$log"
+}
+
+# Prompt-facing block built from latest_gate_failure_tail: the intro + the capped tail, or the
+# empty string when there is no prior failure (so the prompt is byte-identical to before).
+gate_fail_block() {
+  local dir="${1:-.cascade/logs}" body
+  body="$(latest_gate_failure_tail "$dir")" || true
+  [ -n "$body" ] || return 0
+  printf 'A previous attempt failed ./gate.sh in this workspace. Fix the cause shown below\n(tail of the last gate log, ~%s lines) BEFORE re-running the gate:\n\n%s' \
+    "$GATE_TAIL_LINES" "$body"
+}
+
 next_task() {
   # CASCADE_TASK lets cascade.sh dispatch a SPECIFIC committed unit (a backlog line) to this
   # worker instead of the top-of-file pick — so a worker runs the unit it was claimed for,
@@ -347,6 +382,18 @@ while [ "$run" -lt "$MAX_RUNS" ] && [ "$(date +%s)" -lt "$DEADLINE" ]; do
   # The evaluator only reads the conversation, so each condition states how to PROVE it.
   # Two modes: agency (work this repo) and external-project (PROJECT_DIR set — work a client
   # checkout, which to that repo must look like ordinary dev work).
+  #
+  # Plan 2: in agency mode only, inline the previous gate failure's tail (external-project uses the
+  # project's OWN gate via enforce.sh, so there is no agency gate log to route). Empty when there is
+  # no prior failure on disk, so the prompt stays byte-identical to before. `$()` strips trailing
+  # newlines, so the blank-line separator is re-added here, not baked into gate_fail_block.
+  GATE_FAIL_BLOCK=""
+  if [ -z "${PROJECT_DIR:-}" ]; then
+    GATE_FAIL_BLOCK="$(gate_fail_block || true)"
+    if [ -n "$GATE_FAIL_BLOCK" ]; then
+      GATE_FAIL_BLOCK="${GATE_FAIL_BLOCK}"$'\n\n'
+    fi
+  fi
   if [ -n "${PROJECT_DIR:-}" ]; then
     PROJECT_BRANCH="${PROJECT_BRANCH:-agency/work}"
     PROJECT_GATE="${PROJECT_GATE:-./gate.sh}"
@@ -384,7 +431,7 @@ or stop after ${GOAL_MAX_TURNS} turns"
     CLAUDE_CWD=""
     PROMPT="/goal This backlog task is fully complete: ${TASK#- \[ \] }
 
-Context first (just-in-time — do NOT read NOTES.md in full): read director/STATE.md (binding
+${GATE_FAIL_BLOCK}Context first (just-in-time — do NOT read NOTES.md in full): read director/STATE.md (binding
 decisions + invariants you must not violate) and director/MAP.md (the repo index), then open only
 the NOTES.md sections (by the L<n> line pointers in MAP) or the ARCHITECTURE.md parts the MAP points
 you to for THIS task.
