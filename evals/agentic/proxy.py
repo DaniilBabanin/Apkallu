@@ -51,6 +51,10 @@ KEY_VARS = ("LLM_API_KEY",)
 # exactly that raw-HTTP path). LiteLLM sends its own UA which passes; we preserve it and only supply
 # this fallback if a client sent none.
 UA_FALLBACK = "Mozilla/5.0 (X11; Linux x86_64) remote-proxy/1"
+# Upstream socket timeout (seconds). A slow local model (a big-context turn on a partially-offloaded
+# model can take minutes) overruns the default and surfaces as "upstream error: timed out" / 502 to
+# the VM. Raise LLM_PROXY_TIMEOUT for such backends; remote APIs are fine at the default.
+TIMEOUT = int(os.environ.get("LLM_PROXY_TIMEOUT", "300"))
 
 
 def _read_key(path):
@@ -90,7 +94,7 @@ class Handler(BaseHTTPRequestHandler):
             path = (UPSTREAM_PATH + path[len(LOCAL_BASE):]) or "/"   # remap the client's base onto the upstream's
         try:
             conn = http.client.HTTPSConnection if SCHEME == "https" else http.client.HTTPConnection
-            up = conn(UPSTREAM, timeout=300)
+            up = conn(UPSTREAM, timeout=TIMEOUT)
             up.request(method, path, body=body, headers=headers)  # http.client sets Host + Content-Length
             resp = up.getresponse()
             data = resp.read()                            # stream=False -> one JSON blob; read fully
