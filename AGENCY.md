@@ -16,7 +16,8 @@ Given "do XYZ", choose the path before acting:
 - **Queue it for the loop** — a unit of backlog work → append `- [ ] XYZ` to `backlog.md`; the
   scheduler picks it up next cycle.
 - **Decompose it** — a big instruction that splits into ≥2 independent units → `./loop/cascade.sh
-  decompose "XYZ"`, then `./loop/cascade.sh dispatch` per unit.
+  decompose "XYZ"`, `./loop/cascade.sh dispatch` per unit, then `./loop/cascade.sh merge` to land the
+  gate-green branches back into main (the up-cascade).
 - **Escalate it** — needs a human call (irreversible / design fork / money) → append a decision to
   the decisions queue with a recommended default, apply the default, and continue (see "the
   non-blocking decisions queue" below).
@@ -49,7 +50,8 @@ Axis = **does the task execute code?**
 
 `backlog.md` → `loop/scheduler.sh` (quota/budget pacing) → `loop/run.sh` (a worker self-loops to a
 done-condition) → `gate.sh` → commit → `local/digest.sh` → `director/REPORT.md`. `loop/cascade.sh`
-turns a director instruction into committed units, each worked in its own worktree. Execution lanes:
+turns a director instruction into committed units, each worked in its own worktree, then `merge`s the
+gate-green ones back into main (the up-cascade). Execution lanes:
 **orchestrator** (you) · **vm** (`evals/agentic/`, a KVM/libvirt microVM sandbox) · **local model**
 (`local/llm.sh`, a local OpenAI-compatible server).
 
@@ -72,8 +74,9 @@ server instead.
 
 - Run the loop: `./loop/scheduler.sh` (supervises) · burst: `MAX_RUNS=3 ./loop/run.sh` · zero-quota
   (local only): `LOCAL=1 ...`
-- Decompose + dispatch: `./loop/cascade.sh decompose "<instruction>"` ·
-  `./loop/cascade.sh dispatch [--profile local|online]`
+- Decompose + dispatch + merge: `./loop/cascade.sh decompose "<instruction>"` ·
+  `./loop/cascade.sh dispatch [--profile local|online]` · `./loop/cascade.sh merge` (up-cascade: land
+  gate-green branches into main, render the backlog)
 - Gate: `./gate.sh` (must end `RESULT: PASS`) · Status: `./status.sh` · Cockpit: `./tui.sh`
 - Answer a decision: `./local/decide.sh apply <id> yes|no|always|<text> [note]` · list open:
   `./local/decide.sh pending`
@@ -118,7 +121,14 @@ The cascade's coordination state lives in **git refs**, never in a model's opini
 - **dispatch** picks the next ready unit and **commits a claim marker before launching the worker**,
   so a second concurrent dispatcher reads that committed marker and skips the unit — no mailbox, no
   lock server, no LLM arbitration.
-- a **worker** owns exactly one unit on an isolated branch until its `gate.sh` passes.
+- a **worker** owns exactly one unit on an isolated branch until its `gate.sh` passes; it records
+  completion by writing its OWN per-unit marker `done/<id>.md` (never the shared `backlog.md`), so
+  branches stay disjoint — the same per-unit-file partitioning as claims, extended to status.
+- **merge** is the up-cascade: each gate-green branch whose unit is done is fast-forwarded / merged
+  into main in blocked-by order, then its worktree + branch + claim are pruned. merge is the SOLE
+  writer that renders `backlog.md` from the `done/<id>.md` markers (conflict-free + idempotent); a
+  real merge conflict means the disjoint-paths invariant broke, so it escalates (D-NNN) and never
+  auto-resolves.
 - **reconcile** is the bulk-maintenance pass: requeue expired leases, prune orphan worktrees and
   branches, and report any drift between tracked jobs and git. Use `cascade.sh reset <id>` for a
   single stuck unit; `reconcile` for batch cleanup.
@@ -159,7 +169,8 @@ confirm the actual failure mechanism with a cheap ground-truth measurement, not 
 | Start the loop | `./loop/scheduler.sh & disown` (supervises; bursts when quota/budget allows) |
 | Stop it | `pkill -f loop/scheduler.sh` (in-flight `run.sh` finishes cleanly) |
 | Add a task | append `- [ ] …` to `backlog.md` |
-| Dispatch a structured instruction | `./loop/cascade.sh decompose "…"` then `./loop/cascade.sh dispatch` |
+| Dispatch a structured instruction | `./loop/cascade.sh decompose "…"` → `dispatch` per unit → `./loop/cascade.sh merge` |
+| Land finished units (up-cascade) | `./loop/cascade.sh merge` (merges gate-green branches, renders the backlog from `done/<id>.md`) |
 | Reset a stuck unit | `./loop/cascade.sh reset <id>` |
 | Answer a decision | `./local/decide.sh apply <id> <verdict> [note]` |
 | See status / cockpit | `./status.sh` · `./tui.sh` |

@@ -211,11 +211,37 @@ compute_sig() {
   { printf '%s\n=== diff ===\n' "$1"; worktree_diff; } | hash_stdin
 }
 
-# Did the iteration's commit actually CLOSE its task? The gate proves quality only; the one
-# mechanical signal that a backlog task got done is the commit touching backlog.md (the loop
-# moves the picked line under '## Done'). Reads HEAD's file list — exit 0 if touched, 1 if not.
+# Did the iteration's commit actually CLOSE its task? The gate proves quality only; the mechanical
+# signal that a task got done is the commit touching its completion record: a standalone task moves
+# its line under '## Done' in backlog.md; a cascade unit (partition model) writes its own per-unit
+# marker done/<id>.md and does NOT touch the shared backlog (the merge step renders it). Either
+# counts. Reads HEAD's file list — exit 0 if a record was touched, 1 if not. Anchored so a lookalike
+# (backlogXmd) or a nested path never false-matches.
 commit_closed_task() {
-  git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null | grep -qxF backlog.md
+  git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null \
+    | grep -qE '^(backlog\.md|done/[^/]+\.md)$'
+}
+
+# cascade_unit_id <task-line> — print the cascade unit id from a dispatched task line's marker
+# (<!-- cascade: id=<id> ... -->), or nothing for a normal standalone backlog task. Pure.
+cascade_unit_id() {
+  printf '%s' "$1" | grep -oE 'cascade: id=[^ ]+' | sed 's/cascade: id=//' | head -1 || true
+}
+
+# done_instruction <task-line> — the "Done means" completion bullet for the /goal prompt. A cascade
+# unit records completion by writing its OWN per-unit marker (done/<id>.md) and must NOT edit the
+# shared backlog.md — cascade merge renders backlog.md from the markers, so concurrent units never
+# collide on it (the partition model; mirrors how current_tasks/*.claim is per-unit). A standalone
+# task keeps the in-place move under '## Done'. Pure (only reads the task line). NOTE: this is an
+# INSTRUCTION to the worker — real-run compliance (worker actually leaving backlog.md alone) is the
+# thing to watch; if a worker disobeys, merge simply escalates the backlog conflict (fail-safe).
+done_instruction() {
+  local id; id="$(cascade_unit_id "$1")"
+  if [ -n "$id" ]; then
+    printf 'record completion by writing done/%s.md — a short paragraph (what landed + how the gate proved it). Do NOT edit backlog.md: cascade merge renders it from the per-unit markers, so units never collide on the shared file' "$id"
+  else
+    printf "the task line is moved under '## Done' in backlog.md with today's date and a summary"
+  fi
 }
 
 # Pure stall-streak decision (echoes `reset` or `increment`) for one iteration's outcome.
@@ -366,7 +392,7 @@ you to for THIS task.
 Done means ALL of, in $(pwd):
 - the work the task describes is implemented and working
 - ./gate.sh has been run and its output shown, ending in 'RESULT: PASS'
-- the task line is moved under '## Done' in backlog.md with today's date and a summary
+- $(done_instruction "$TASK")
 - a learnings section for this task is APPENDED to the END of NOTES.md — never rewrite,
   reorder, or delete existing NOTES.md content; the gate fails the iteration if NOTES.md shrinks
 

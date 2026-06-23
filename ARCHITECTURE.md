@@ -6,7 +6,8 @@ A director queues work; an unattended loop turns it into committed, gated change
 - **The loop** (`loop/run.sh`) picks the top `backlog.md` task, works it via Claude Code's `/goal`,
   runs `./gate.sh`, and commits only on green. The **scheduler** (`loop/scheduler.sh`) bursts
   iterations whenever budget/quota allow. The **cascade** (`loop/cascade.sh`) decomposes a big
-  instruction into independent units and dispatches them across isolated git worktrees.
+  instruction into independent units, dispatches them across isolated git worktrees, and merges the
+  gate-green ones back into main (the up-cascade).
 - **Execution is sandboxed.** Code that runs untrusted commands goes to a disposable microVM
   (`evals/agentic/`): the host is never at risk, the inference key stays off the VM (host-side
   `proxy.py`), and egress is allowlisted (`egress_proxy.py`). The loop's own inner Claude runs under

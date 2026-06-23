@@ -43,6 +43,8 @@ else
 fi
 
 echo "[setup] inference config"
+# shellcheck source=/dev/null  # .env is a gitignored runtime drop-in, absent from fresh clones /
+# git-worktree checkouts; without this, `shellcheck -x` emits SC1091 and fails the worktree gate.
 if [ -f "$ROOT/.env" ]; then set -a; . "$ROOT/.env"; set +a; fi
 if [ -n "${LLM_BASE_URL:-}${LLM_UPSTREAM_HOST:-}" ]; then ok "LLM_BASE_URL set"
 else warn "LLM_BASE_URL / LLM_UPSTREAM_HOST unset (set in $ROOT/.env) — proxy has no upstream"; fi

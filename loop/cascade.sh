@@ -27,6 +27,13 @@
 #                               + branch + claim (the diagnostic log under .cascade/logs/ is kept),
 #                               leaving the backlog unit unchecked so `dispatch` re-picks it.
 #
+#   merge                       The UP-cascade: land every DONE, gate-green cascade/<id> branch into
+#                               the base branch (HEAD), in blocked-by order; prune each merged unit's
+#                               worktree + branch + claim. A merge conflict means the disjoint-paths
+#                               invariant broke — it is NOT auto-resolved: abort, escalate (D-NNN),
+#                               leave the branch intact. Runs local/digest.sh after a non-empty batch
+#                               (the "+digest" half). Merge authority = git facts + ./gate.sh, no LLM.
+#
 #   reconcile                   Bulk maintenance (replaces ad-hoc `reset` for batch cleanup):
 #                               call reap_expired() to requeue PG leases that expired, prune
 #                               orphan worktrees (no claim + PG confirms not running), prune
@@ -46,8 +53,8 @@
 #                               `export CLAUDE_CODE_OAUTH_TOKEN="$(loop/cascade.sh oauth-token)"`.
 #
 # "Done" is never an LLM saying so: a unit is done only when its branch passes ./gate.sh and is
-# checked off in backlog.md. run.sh owns that verdict; this script orchestrates the DOWN-cascade
-# (the up-cascade — merge + digest — is the the gate milestone demo task, not this one).
+# checked off in backlog.md. run.sh owns that per-unit verdict; this script orchestrates BOTH the
+# DOWN-cascade (decompose -> dispatch) and the UP-cascade (merge -> digest): git facts decide.
 #
 # Why git-worktree (not the `claude --worktree` flag): the worker is loop/run.sh, which runs the
 # gate and commits in its OWN cwd. So worker-level isolation means the WHOLE worker (claude edit
@@ -60,6 +67,9 @@
 #   DECOMPOSE_CMD           override the decompose command (tests). Default: a `claude -p` call.
 #   CASCADE_DECOMPOSE_MAX_TURNS  max turns for the default decompose `claude -p` (default 6; D-019).
 #   WORKER_CMD              override the worker command (tests). Default: ./loop/run.sh.
+#   CASCADE_GATE_CMD       override the per-branch merge gate (tests). Default: ./gate.sh, run
+#                          inside the unit's worktree (the `merge` subcommand's green check).
+#   CASCADE_DIGEST_CMD     override the post-merge digest command (tests). Default: local/digest.sh.
 #   CASCADE_BATCH           batch id prefix for generated unit ids (default c<timestamp>).
 #   CASCADE_MAX_CONCURRENT  concurrency ceiling = claims in flight (default 5).
 #   CASCADE_WT_DIR          worktree base dir (default <repo>/.cascade/worktrees, gitignored).
@@ -97,6 +107,7 @@ source "$_CASCADE_SCRIPT_DIR/lib/pg.sh"
 
 BACKLOG="backlog.md"
 CLAIM_DIR="current_tasks"
+DONE_DIR="done"   # per-unit done-markers (done/<id>.md); the merge renders BACKLOG from these
 CASCADE_MAX_CONCURRENT="${CASCADE_MAX_CONCURRENT:-5}"
 CASCADE_WT_DIR="${CASCADE_WT_DIR:-$REPO_DIR/.cascade/worktrees}"
 CASCADE_LOG_DIR="${CASCADE_LOG_DIR:-$REPO_DIR/.cascade/logs}"   # worker run logs (gitignored; in the MAIN repo, so a worktree revert/prune can't take them)
@@ -142,6 +153,17 @@ unit_merged() {
   [ -n "$(git log -1 --format=%H -F --grep="cascade: id=$1 " 2>/dev/null || true)" ]
 }
 
+# rc 0 if branch cascade/<id> carries the worker's loop commit for this unit AHEAD of the base
+# (HEAD). The merge readiness signal — NOT unit_checked: the worker moves the backlog line to Done
+# (checks the box) on its BRANCH, so unit_checked(main) is still false until the merge lands. The
+# loop commit's MESSAGE mechanically embeds the marker (run.sh: `git commit -m "loop: <line>"`,
+# and the line carries `cascade: id=<id> `), so this is the same robust trick as unit_merged but
+# scoped to what the branch adds. A branch with only the claim commit (work not done / rolled back)
+# has nothing ahead and is NOT matched. Trailing space disambiguates u1 from u10 (cf. unit_merged).
+branch_unit_done() {
+  [ -n "$(git log "HEAD..cascade/$1" -1 --format=%H -F --grep="cascade: id=$1 " 2>/dev/null || true)" ]
+}
+
 active_claims() {
   local n=0 pg_n=0
   if [ -d "$CLAIM_DIR" ]; then
@@ -183,20 +205,28 @@ next_decision_id() {
   printf 'D-%03d' "$(( 10#${n:-0} + 1 ))"
 }
 
+# escalate <title> <body> [question] [options] [recommended] [default-note]
+# Append a non-blocking director decision (ARCHITECTURE principle 1). The optional 3rd–6th args let
+# a caller supply its own question/options/recommended/default-note; omitted, they default to the
+# decompose-failure wording (the original, sole caller) so its output is byte-for-byte unchanged.
 escalate() {
-  local title="$1" body="$2" id today apply
+  local title="$1" body="$2"
+  local question="${3:-The decompose contract did not yield >=2 valid units — what should change?}"
+  local options="${4:-(a) re-run decompose (transient miss) · (b) sharpen the instruction · (c) fix the decompose prompt/model}"
+  local recommended="${5:-(a) — usually a transient/format miss; persistent failure means (c).}"
+  local defnote="${6:-default = skip this instruction, keep cascade alive}"
+  local id today apply
   id="$(next_decision_id)"
   today="$(date +%F)"
   apply="$(date -d '+3 days' +%F 2>/dev/null || date +%F)"
   mkdir -p director
   {
     printf '\n## %s — %s\n' "$id" "$title"
-    printf '**Asked:** %s · **Default applies:** %s → default = skip this instruction, keep cascade alive\n' \
-      "$today" "$apply"
+    printf '**Asked:** %s · **Default applies:** %s → %s\n' "$today" "$apply" "$defnote"
     printf '**Trigger:** %s\n' "$body"
-    printf '**Question:** The decompose contract did not yield >=2 valid units — what should change?\n'
-    printf '**Options:** (a) re-run decompose (transient miss) · (b) sharpen the instruction · (c) fix the decompose prompt/model\n'
-    printf '**Recommended default:** (a) — usually a transient/format miss; persistent failure means (c).\n'
+    printf '**Question:** %s\n' "$question"
+    printf '**Options:** %s\n' "$options"
+    printf '**Recommended default:** %s\n' "$recommended"
     printf '**Answer:**\n'
   } >> director/DECISIONS.md
   echo "[cascade] escalated $id — $title" >&2
@@ -574,6 +604,20 @@ cmd_dispatch() {
   return 0
 }
 
+# prune_unit <id> — silent git teardown of a unit's worktree + branch (idempotent; missing pieces
+# skipped). The shared teardown used by both `reset` (clean retry) and `merge` (post-land cleanup);
+# it touches ONLY git refs/worktrees — the claim file + backlog line are the caller's concern.
+prune_unit() {
+  local branch="cascade/$1" wt="$CASCADE_WT_DIR/$1"
+  if [ -d "$wt" ]; then
+    git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
+  fi
+  git worktree prune 2>/dev/null || true
+  if git show-ref --verify --quiet "refs/heads/$branch"; then
+    git branch -D "$branch" >/dev/null 2>&1 || true
+  fi
+}
+
 # reset <id> — release a unit so dispatch can re-pick it: remove its worktree + branch + claim
 # (claims are a filesystem check, so removal unclaims it). The backlog unit stays unchecked and its
 # log under .cascade/logs/ is KEPT (the diagnosis you re-run to read). Idempotent: missing pieces
@@ -585,15 +629,9 @@ cmd_reset() {
     return 1
   fi
   local branch="cascade/$id" wt="$CASCADE_WT_DIR/$id" claim="$CLAIM_DIR/$id.claim"
-  if [ -d "$wt" ]; then
-    git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
-    echo "[cascade] reset: removed worktree $wt"
-  fi
-  git worktree prune 2>/dev/null || true
-  if git show-ref --verify --quiet "refs/heads/$branch"; then
-    git branch -D "$branch" >/dev/null 2>&1 || true
-    echo "[cascade] reset: deleted branch $branch"
-  fi
+  if [ -d "$wt" ]; then echo "[cascade] reset: removing worktree $wt"; fi
+  if git show-ref --verify --quiet "refs/heads/$branch"; then echo "[cascade] reset: deleting branch $branch"; fi
+  prune_unit "$id"
   if git ls-files --error-unmatch "$claim" >/dev/null 2>&1; then
     git rm -qf "$claim" >/dev/null 2>&1 || rm -f "$claim"
     if [ "${CASCADE_NO_COMMIT:-0}" != "1" ]; then
@@ -678,11 +716,138 @@ cmd_reconcile() {
   echo "[cascade] reconcile: done."
 }
 
+# render_backlog — single-writer regeneration of BACKLOG from per-unit done-markers on the base.
+# The partition model (D-006 lineage): a worker no longer ticks the shared BACKLOG; it writes its own
+# done/<id>.md on its branch, so branches are purely additive (disjoint) and fan-in never conflicts on
+# BACKLOG. merge is the SOLE writer of the rendered view => no sink race within a run; deterministic +
+# idempotent (flipping an already-[x] line is a no-op). The marker file holds the worker's move-to-Done
+# prose (a per-unit completion record / lineage spine). Tick every unit that has a landed marker.
+render_backlog() {
+  local m id
+  if [ ! -d "$DONE_DIR" ]; then return 0; fi
+  for m in "$DONE_DIR"/*.md; do
+    [ -e "$m" ] || continue
+    id="$(basename "$m" .md)"
+    sed -i "/id=$id /s/^- \[ \]/- [x]/" "$BACKLOG"
+  done
+}
+
+# --- merge (the UP-cascade: land gate-green, done branches into the base) ---------------------
+# GUPP up-cascade: a cascade/<id> branch whose worker finished the unit (its loop commit is present,
+# ahead of the base — branch_unit_done) AND whose isolated branch passes ./gate.sh is, by Apkallu's
+# own rule, DONE — so land it. git facts + the gate are the merge authority; no LLM, no human.
+#   * order: a unit waits until its blocked-by dependency has landed in the base; multi-pass, so a
+#     merge can unblock the next (a dep's loop commit reaching HEAD satisfies unit_merged(dep)).
+#   * green-branch ⇒ green-merge under the disjoint-paths invariant (AGENCY.md): a branch that truly
+#     needed an unmerged dep's code would fail its OWN isolated gate, and a shared path surfaces as a
+#     merge conflict — so a clean gate + a clean merge together are the honest "safe to land" proof.
+#   * conflicts: a conflict means the disjoint-paths invariant broke. It is NOT auto-resolved (that
+#     is a human call) — abort, escalate (D-NNN), leave the branch + worktree intact, skip only it.
+#   * cleanup: a merged unit's worktree + branch are pruned (prune_unit) and its claim released.
+#   * after a non-empty batch, run local/digest.sh (the "+digest" half of the up-cascade).
+# NOTE: a PG-claimed unit's job row is NOT transitioned here (the file-claim path is released; the
+# PG job-state lifecycle on merge is future work) — a known gap, not a silent one.
+cmd_merge() {
+  local base gate_cmd merged=0 conflicted=0 skipped=0
+  base="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
+  gate_cmd="${CASCADE_GATE_CMD:-./gate.sh}"
+  local -a merged_ids=()
+  local -A handled=()
+
+  local progress=1 id branch wt bb
+  while [ "$progress" = 1 ]; do
+    progress=0
+    while IFS= read -r id; do
+      [ -n "$id" ] || continue
+      branch="cascade/$id"
+      if ! git show-ref --verify --quiet "refs/heads/$branch"; then continue; fi  # gone (merged)
+      if [ -n "${handled[$id]:-}" ]; then continue; fi          # conflicted / gate-failed this run
+      if ! branch_unit_done "$id"; then continue; fi            # worker not finished on the branch
+      bb="$(unit_blocked_by "$id")"
+      if [ -n "$bb" ] && [ "$bb" != "none" ]; then
+        if ! unit_checked "$bb" && ! unit_merged "$bb"; then
+          continue                                              # blocked-by has not landed yet — wait
+        fi
+      fi
+      wt="$CASCADE_WT_DIR/$id"
+      if [ ! -d "$wt" ]; then
+        echo "[cascade] merge: $id has no worktree to gate — skipping." >&2
+        handled[$id]=1; skipped=$((skipped + 1)); continue
+      fi
+      if ! ( cd "$wt" && bash -c "$gate_cmd" ) >/dev/null 2>&1; then
+        echo "[cascade] merge: $id branch is not gate-green — skipping (no green, no merge)." >&2
+        handled[$id]=1; skipped=$((skipped + 1)); continue
+      fi
+      # Lazy: a fast-forward when the base has not moved, else a no-edit merge commit. NEVER resolve
+      # a conflict — abort + escalate (disjoint paths means a conflict is a broken invariant).
+      if git merge --ff-only "$branch" >/dev/null 2>&1 \
+           || git merge --no-edit "$branch" >/dev/null 2>&1; then
+        echo "[cascade] merge: landed $id into $base."
+        prune_unit "$id"
+        merged_ids+=("$id"); merged=$((merged + 1)); progress=1
+      else
+        git merge --abort >/dev/null 2>&1 || true
+        escalate "cascade merge conflict on $id" \
+"Merging cascade/$id into $base hit a conflict — the disjoint-paths invariant (AGENCY.md: units own disjoint paths so branches merge clean) was violated. Auto-resolution is unsafe; the branch + worktree are left intact." \
+"cascade/$id conflicts with $base on merge — how should it land?" \
+"(a) inspect the conflicting paths and merge by hand · (b) reset the unit and re-dispatch from current $base · (c) drop the unit" \
+"(a) — the worktree + branch are preserved for inspection; a conflict means two units shared a path." \
+"default = skip this merge, leave the branch for manual handling, keep the cascade alive"
+        echo "[cascade] merge: $id CONFLICTS — aborted, escalated (branch left intact)." >&2
+        handled[$id]=1; conflicted=$((conflicted + 1))
+      fi
+    done < <(git for-each-ref --format='%(refname:short)' 'refs/heads/cascade/' 2>/dev/null \
+             | sed 's|^cascade/||' || true)
+  done
+
+  # Release the claims of every landed unit (one commit; mirrors reset's claim release).
+  if [ "${#merged_ids[@]}" -gt 0 ]; then
+    local rid removed=0
+    for rid in "${merged_ids[@]}"; do
+      if git ls-files --error-unmatch "$CLAIM_DIR/$rid.claim" >/dev/null 2>&1; then
+        git rm -qf "$CLAIM_DIR/$rid.claim" >/dev/null 2>&1 || rm -f "$CLAIM_DIR/$rid.claim"
+        removed=$((removed + 1))
+      elif [ -f "$CLAIM_DIR/$rid.claim" ]; then
+        rm -f "$CLAIM_DIR/$rid.claim"
+      fi
+    done
+    if [ "$removed" -gt 0 ]; then
+      git commit -q -m "cascade merge: release $removed claim(s)" -- "$CLAIM_DIR" 2>/dev/null || true
+    fi
+  fi
+
+  # Single-writer render of the human BACKLOG from the per-unit done-markers now on the base.
+  # merge owns this write (no other writer touches BACKLOG during fan-in), so it cannot conflict;
+  # it is idempotent, so a re-run is a safe no-op. NOTE: concurrent `merge` invocations are not
+  # expected (fan-in is a single step) — if that changes, guard merge with a single-instance lock.
+  if [ "$merged" -gt 0 ]; then
+    render_backlog
+    git add "$BACKLOG" 2>/dev/null || true
+    if ! git diff --cached --quiet -- "$BACKLOG" 2>/dev/null; then
+      git commit -q -m "cascade merge: render backlog from done-markers ($merged landed)" -- "$BACKLOG" 2>/dev/null || true
+    fi
+  fi
+
+  # The "+digest" half of the up-cascade — only after we actually landed something.
+  if [ "$merged" -gt 0 ]; then
+    local digest_cmd="${CASCADE_DIGEST_CMD:-}"
+    if [ -n "$digest_cmd" ]; then
+      bash -c "$digest_cmd" || true
+    elif [ -x local/digest.sh ]; then
+      local/digest.sh || true
+    fi
+  fi
+
+  echo "[cascade] merge: $merged landed, $conflicted conflict(s) escalated, $skipped skipped."
+  return 0
+}
+
 # --- dispatch ---------------------------------------------------------------------------------
 case "${1:-}" in
   decompose)   shift; cmd_decompose "${1:-}" ;;
   dispatch)    shift; cmd_dispatch "$@" ;;
   reset)       shift; cmd_reset "${1:-}" ;;
+  merge)       cmd_merge ;;
   reconcile)   cmd_reconcile ;;
   next-ready)  next_ready ;;
   profile-env) shift; profile_env "${1:-}" "${2:-cli}" ;;

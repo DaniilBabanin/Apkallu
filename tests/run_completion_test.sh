@@ -61,6 +61,22 @@ git add -A
 git commit -qm "loop: add lookalike file"
 if commit_closed_task; then fail "lookalike-filename -> not-closed"; else pass "lookalike-filename -> not-closed"; fi
 
+# 5. a cascade unit's per-unit marker (done/<id>.md) ALSO counts as closing (partition model) ----
+R="$(new_repo)"; cd "$R"
+mkdir -p ./done
+printf 'landed\n' > done/cTest-u1.md
+git add -A
+git commit -qm "loop: write done-marker"
+if commit_closed_task; then pass "done-marker-commit -> closed (cascade partition)"; else fail "done-marker-commit -> closed (cascade partition)"; fi
+
+# 6. a nested path under done/ must NOT match (markers are single-level done/<id>.md) ----
+R="$(new_repo)"; cd "$R"
+mkdir -p ./done/sub
+printf 'z\n' > done/sub/y.md
+git add -A
+git commit -qm "loop: nested done file"
+if commit_closed_task; then fail "nested-done -> not-closed"; else pass "nested-done -> not-closed"; fi
+
 # --- stall_decision: committed backlog_touched notes_changed project_mode ---
 chk() { # name expected committed backlog_touched notes_changed project_mode
   local name="$1" want="$2" got
@@ -81,6 +97,30 @@ chk "nothing-happened -> increment"        increment 0 0 0 0
 chk "external-commit -> reset"             reset     1 0 0 1
 chk "external-notes-only -> reset"         reset     0 0 1 1
 chk "external-nothing -> increment"        increment 0 0 0 1
+
+# --- cascade_unit_id + done_instruction: the /goal completion contract (partition vs standalone) --
+# The ONLY mechanical check on the run.sh contract change — a real claude worker can't run in the
+# gate, so the prompt branch is verified here (a stub worker would obey either instruction blindly).
+CASCADE_LINE='- [ ] **build it** — do the thing. <!-- cascade: id=cZ-u7 blocked-by=none -->'
+PLAIN_LINE='- [ ] just a normal backlog task'
+
+id="$(cascade_unit_id "$CASCADE_LINE")"
+if [ "$id" = "cZ-u7" ]; then pass "cascade_unit_id extracts the unit id from a dispatched marker"; else fail "cascade_unit_id got '$id' (want cZ-u7)"; fi
+id="$(cascade_unit_id "$PLAIN_LINE")"
+if [ -z "$id" ]; then pass "cascade_unit_id is empty for a standalone task"; else fail "cascade_unit_id got '$id' (want empty)"; fi
+
+di="$(done_instruction "$CASCADE_LINE")"
+if printf '%s' "$di" | grep -q 'done/cZ-u7\.md' && printf '%s' "$di" | grep -qi 'do NOT edit backlog'; then
+  pass "done_instruction (cascade): names done/<id>.md and forbids editing backlog.md"
+else
+  fail "done_instruction (cascade) wrong: $di"
+fi
+di="$(done_instruction "$PLAIN_LINE")"
+if printf '%s' "$di" | grep -q '## Done' && ! printf '%s' "$di" | grep -q 'done/'; then
+  pass "done_instruction (standalone): keeps the in-place move under '## Done'"
+else
+  fail "done_instruction (standalone) wrong: $di"
+fi
 
 # --- inner_cost: parse total_cost_usd from a `claude --output-format json` blob (budget mode) ---
 # Feeds loop/scheduler.sh's burst spend accounting; must be empty (a no-op record) when absent.
