@@ -135,13 +135,11 @@ Net effect: most tasks hit a warm model, and the expensive slot changes only whe
 
 ## Security posture, by lane
 
-- **Assume every worker model can be prompt-injected.** Do not grade models on injection resistance and
-  do not rely on it. Safety comes from the harness, the sandbox, and the gate.
-- **The VM is the boundary.** Untrusted or experimental code runs only inside it; secrets stay off it.
-- **No secrets in any worker's context.** Local and open-model workers receive no cloud tokens and no
-  payment credentials.
-- **Worker output is untrusted.** It is reviewed by the gater (frontier model or human) before it
-  touches anything real, and irreversible actions always stop at the gate.
+A recap of what the lanes and rules above already establish, in one place: every worker model is
+assumed prompt-injectable, so safety lives in the harness, the sandbox, and the gate, never in the
+model. The VM is the boundary (untrusted or experimental code runs only inside it, secrets stay off
+it). No worker gets cloud tokens or payment credentials. Worker output is untrusted until the gater
+(frontier model or human) reviews it, and irreversible actions always stop at the gate.
 
 ---
 
