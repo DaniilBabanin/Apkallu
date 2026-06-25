@@ -149,6 +149,29 @@ SQL
 **Gate-fail streaks (>=2):** ${_streak_fmt}"
     fi
 
+    # Attempt green-rate by model: per-attempt pass rate (gate.passed / all gate verdicts)
+    # attributed via the committed job's ran_on edge. CAVEAT: only jobs that greened >=1x are
+    # attributable, so this is "green-rate over jobs that eventually greened", not a raw success
+    # rate (full model x profile breakdown: local/lineage.sh greenrate).
+    _green="$(PGCONNECT_TIMEOUT=3 psql "$(_pg_dsn)" -tAq 2>/dev/null <<'SQL' || true
+SELECT mv.natural_key || ' ' ||
+       round(100.0 * sum(CASE WHEN ev.type = 'gate.passed' THEN 1 ELSE 0 END) / count(*)) || '% (' ||
+       sum(CASE WHEN ev.type = 'gate.passed' THEN 1 ELSE 0 END) || '/' || count(*) || ')'
+FROM events ev
+JOIN nodes job_n ON ev.stream_name = 'job-' || job_n.natural_key AND job_n.kind = 'job'
+JOIN edges ran   ON ran.from_node = job_n.id AND ran.label = 'ran_on' AND ran.invalidated_by IS NULL
+JOIN nodes mv    ON mv.id = ran.to_node AND mv.kind = 'model_version'
+WHERE ev.type IN ('gate.passed','gate.failed') AND ev.invalidated_by IS NULL
+GROUP BY mv.natural_key
+ORDER BY 1;
+SQL
+    )"
+    if [ -n "$_green" ]; then
+      _green_fmt="$(printf '%s\n' "$_green" | awk 'NF{a=a sep $0; sep=" · "} END{print a}')"
+      LINEAGE_SECTION="${LINEAGE_SECTION}
+**Attempt green-rate by model:** ${_green_fmt}"
+    fi
+
     # Bench discard rate: fraction of superseded verdicts
     _discard="$(pg_query "SELECT CASE WHEN count(*) > 0 THEN round(100.0 * count(*) FILTER (WHERE NOT current) / count(*)) ELSE 0 END FROM bench_verdicts" || true)"
     if [ -n "${_discard:-}" ] && [ "${_discard:-0}" != "0" ]; then

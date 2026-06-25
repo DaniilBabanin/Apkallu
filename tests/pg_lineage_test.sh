@@ -12,6 +12,8 @@
 #   6. supersession chain          — older edge invalidated_by set to newer edge id
 #   7. views queryable             — commit_provenance, model_outputs, bench_verdicts
 #                                    return rows when data present
+#  14. greenrate                   — per-attempt green-rate per model/profile (counts gate
+#                                    verdicts, NOT jobs; rejects a per-job reading) + PG-down skip
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -23,15 +25,27 @@ unset CLAUDE_CODE_HOST_HTTP_PROXY_PORT
 
 trap 'pg_fixture_teardown' EXIT
 
-if [ -z "${AGENCY_PG_HOST:-}" ]; then
-  echo "# pg_lineage_test: fixture did not export AGENCY_PG_HOST — skip"
-  exit 0
-fi
-
 FAIL=0
 N=0
 pass() { N=$(( N + 1 )); echo "ok   $1"; }
 fail() { N=$(( N + 1 )); FAIL=1; echo "FAIL $1"; }
+
+# ── greenrate PG-down: clean skip, no error ───────────────────────────────────
+# Runs BEFORE the fixture gate so it's proven even on machines without PG18 (where the rest of
+# this file skips). AGENCY_PG_PORT=1 forces PG_AVAIL=0 in the child; greenrate must exit 0 with a
+# skip line (the readout is automation-consumed — a missing DB is a no-op, not a failure).
+if _GRD="$(AGENCY_PG_PORT=1 bash local/lineage.sh greenrate 2>&1)"; then _grc=0; else _grc=$?; fi
+if [ "$_grc" = "0" ] && printf '%s' "$_GRD" | grep -qi 'PG unavailable'; then
+  pass "greenrate: PG-down clean skip (rc=0, no error)"
+else
+  fail "greenrate: PG-down expected clean skip — rc=$_grc out='$_GRD'"
+fi
+
+if [ -z "${AGENCY_PG_HOST:-}" ]; then
+  echo "# pg_lineage_test: fixture did not export AGENCY_PG_HOST — skipping DB-backed checks"
+  echo "pg_lineage_test: $N tests, $FAIL failed"
+  exit "$FAIL"
+fi
 
 # Helper: run SQL as agency_loop; capture stderr too (for permission checks)
 agency_sql() { psql -h 127.0.0.1 -p "$AGENCY_PG_PORT" -U agency_loop agency_test -tAq -c "$1" 2>&1; }
@@ -218,6 +232,49 @@ if printf '%s' "$_B" | grep -q "2/2" \
   pass "lineage bench: current-only shows 2/2 not 1/2; --all shows superseded 1/2"
 else
   fail "lineage bench: bench='$(printf '%s' "$_B" | tr '\n' '|')' all='$(printf '%s' "$_BA" | tr '\n' '|')'"
+fi
+
+# ── 14. greenrate: per-attempt green-rate per (model, profile) ────────────────
+# Realistic fixture: every job greened >=1x (the only state run.sh can produce — job nodes are
+# written only on the green path), and the fails co-occur with a pass in the SAME stream so they
+# attribute to the model. Multi-event streams make the test reject a per-job reading.
+_MVA="$(pg_admin "SELECT upsert_node('model_version','gr-modelA','{}')")"
+_MVB="$(pg_admin "SELECT upsert_node('model_version','gr-modelB','{}')")"
+_SPO="$(pg_admin "SELECT upsert_node('sandbox_profile','gr-online','{}')")"
+
+for _j in grA1 grA2 grB1; do
+  _jn="$(pg_admin "SELECT upsert_node('job','$_j','{}')")"
+  case "$_j" in
+    grA1 | grA2) pg_admin "SELECT add_edge($_jn,$_MVA,'ran_on','{}')" >/dev/null ;;
+    grB1)        pg_admin "SELECT add_edge($_jn,$_MVB,'ran_on','{}')" >/dev/null ;;
+  esac
+  pg_admin "SELECT add_edge($_jn,$_SPO,'under_profile','{}')" >/dev/null
+done
+
+# events (append_event auto-positions per stream):
+#   grA1: fail,pass   grA2: pass            -> modelA = 2 passed / 3 total = 67%
+#   grB1: fail,fail,pass                    -> modelB = 1 passed / 3 total = 33%
+pg_admin "SELECT append_event('job-grA1','gate.failed','{}'::jsonb)" >/dev/null
+pg_admin "SELECT append_event('job-grA1','gate.passed','{}'::jsonb)" >/dev/null
+pg_admin "SELECT append_event('job-grA2','gate.passed','{}'::jsonb)" >/dev/null
+pg_admin "SELECT append_event('job-grB1','gate.failed','{}'::jsonb)" >/dev/null
+pg_admin "SELECT append_event('job-grB1','gate.failed','{}'::jsonb)" >/dev/null
+pg_admin "SELECT append_event('job-grB1','gate.passed','{}'::jsonb)" >/dev/null
+
+_GR="$(bash local/lineage.sh greenrate 2>&1)"
+if printf '%s' "$_GR" | grep -qE 'gr-modelA .*gr-online .*2/3 .*67%' \
+    && printf '%s' "$_GR" | grep -qE 'gr-modelB .*gr-online .*1/3 .*33%'; then
+  pass "greenrate: per-attempt rate per model/profile (A 2/3=67%, B 1/3=33%)"
+else
+  fail "greenrate: got: $(printf '%s' "$_GR" | tr '\n' '|')"
+fi
+
+# The discriminating check: A's stream is fail+pass. A per-JOB reading would call A 3/3 (100%);
+# per-attempt is 2/3. Assert the per-job reading is NOT what we emit.
+if printf '%s' "$_GR" | grep -qE 'gr-modelA .*(3/3|100%)'; then
+  fail "greenrate: modelA shown as 3/3 or 100% — that's a per-JOB reading, not per-attempt"
+else
+  pass "greenrate: modelA counted per-attempt (fail+pass = 2/3), not per-job (100%)"
 fi
 
 echo ""

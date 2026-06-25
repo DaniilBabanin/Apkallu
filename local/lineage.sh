@@ -5,6 +5,7 @@
 #   local/lineage.sh commit <sha>      — show commit provenance + gate verdict
 #   local/lineage.sh model <id>        — list outputs for a model version
 #   local/lineage.sh bench [--all]     — show bench verdicts (current-only by default)
+#   local/lineage.sh greenrate         — attempt green-rate per model/profile
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -206,8 +207,65 @@ SQL
   fi
   ;;
 
+# ── greenrate ────────────────────────────────────────────────────────────────
+# Per-attempt green-rate per (model_version, sandbox_profile): of all gate verdicts attributed
+# to a model/profile, what fraction were gate.passed (vs gate.failed).
+#
+# ATTRIBUTION CAVEAT (the number means less than its name suggests — routing must read it right):
+# lineage nodes/edges are written ONLY on the green/commit path (loop/run.sh), so a job becomes
+# attributable to a model/profile only once it has greened at least once. gate.failed attempts on
+# jobs that NEVER greened have no job node and are silently dropped. So this is the *attempt*
+# green-rate over jobs that eventually greened — NOT a raw success rate — and a model that never
+# greens is ABSENT here, not 0%. A second skew: a stream's pre-green gate.failed attempts attribute
+# to whichever model eventually greened that stream, which may differ from the model that ran the
+# failed attempt (e.g. after a local->online escalation). Counting is per-attempt (each gate verdict
+# event), not per-job (a job with a fail then a pass counts as 1 green / 2 total, not 100%).
+#
+# PG-down → clean skip (exit 0), unlike the sibling subcommands' _pg_check (exit 1): this readout
+# is consumed by automation (digest / director), so a missing DB is a no-op, not an error.
+greenrate)
+  if [ "${PG_AVAIL}" != "1" ]; then
+    printf 'green-rate: PG unavailable — skipped\n'
+    exit 0
+  fi
+
+  _rows="$(PGCONNECT_TIMEOUT=3 psql "$(_pg_dsn)" -tAq 2>/dev/null <<'SQL'
+WITH attributed AS (
+  SELECT mv.natural_key                  AS model,
+         coalesce(sp.natural_key,'(none)') AS profile,
+         ev.type                         AS verdict
+  FROM events ev
+  JOIN nodes job_n ON ev.stream_name = 'job-' || job_n.natural_key AND job_n.kind = 'job'
+  JOIN edges ran   ON ran.from_node = job_n.id AND ran.label = 'ran_on' AND ran.invalidated_by IS NULL
+  JOIN nodes mv    ON mv.id = ran.to_node AND mv.kind = 'model_version'
+  LEFT JOIN edges prof ON prof.from_node = job_n.id AND prof.label = 'under_profile' AND prof.invalidated_by IS NULL
+  LEFT JOIN nodes sp   ON sp.id = prof.to_node AND sp.kind = 'sandbox_profile'
+  WHERE ev.type IN ('gate.passed','gate.failed') AND ev.invalidated_by IS NULL
+)
+SELECT model, profile,
+       sum(CASE WHEN verdict = 'gate.passed' THEN 1 ELSE 0 END) AS green,
+       count(*)                                                 AS total,
+       round(100.0 * sum(CASE WHEN verdict = 'gate.passed' THEN 1 ELSE 0 END) / count(*)) AS rate
+FROM attributed
+GROUP BY model, profile
+ORDER BY rate DESC, total DESC, model;
+SQL
+  )"
+
+  if [ -z "$_rows" ]; then
+    printf 'no attributed gate verdicts\n'
+    exit 0
+  fi
+
+  printf '%-32s %-10s %-9s %s\n' Model Profile Green/Tot Rate
+  while IFS='|' read -r _mv _pf _g _t _r; do
+    printf '%-32s %-10s %-9s %s%%\n' "$_mv" "$_pf" "$_g/$_t" "$_r"
+  done <<< "$_rows"
+  printf '(attempt green-rate over jobs that eventually greened; never-greened jobs are not attributable)\n'
+  ;;
+
 *)
-  printf 'usage: local/lineage.sh import|commit|model|bench ...\n' >&2
+  printf 'usage: local/lineage.sh import|commit|model|bench|greenrate ...\n' >&2
   exit 1
   ;;
 
