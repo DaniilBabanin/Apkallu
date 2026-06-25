@@ -25,3 +25,6 @@ evals/agentic/ssh/
 # vm/proxy runtime + generated smoke report
 evals/agentic/build/
 evals/agentic/smoke.md
+
+# local planning scratch — kept on device, not published
+plan/
