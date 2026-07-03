@@ -8,6 +8,12 @@
 **/queue-out/
 *.log
 
+# cascade runtime (worktrees, logs, claims) — live worker state, never publish
+.cascade/
+
+# escalation lockfile (escalate() flock — serializes D-NNN id minting)
+director/DECISIONS.md.lock
+
 # python / node junk
 __pycache__/
 *.pyc

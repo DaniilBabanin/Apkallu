@@ -10,19 +10,20 @@
 # Env:
 #   GATE_SHELLCHECK_SEVERITY  min severity that fails the gate:
 #                             error | warning | info | style
-#                             (default: warning — see note below)
+#                             (default: style — see note below)
 #   GATE_SHELLCHECK_OPTS      extra args passed verbatim to shellcheck (default: -x)
 #   GATE_NOTES_MAX_DELETIONS  max lines an iteration may DELETE from NOTES.md vs HEAD
-#                             (default 20). NOTES.md is the loop's only cross-iteration
+#                             (default 20; effective tolerance is capped at half the
+#                             file's HEAD line count, so a full wipe of a SMALL file
+#                             still fails). NOTES.md is the loop's only cross-iteration
 #                             memory and is append-only by convention; a local-model run
 #                             (2026-06-06) rewrote it wholesale, wiping 204 lines. Catches
 #                             whole-file rewrites while allowing small in-place fixes.
 #
-# Severity note (v0): default is "warning" so the gate is green on the existing
-# tree. loop/run.sh currently carries info-level findings (SC2015 A&&B||C,
-# SC2086 unquoted $PERM_FLAG). Once those are cleaned, bump the default to
-# "style" (strictest) — the intended end state. Override anytime:
-#   GATE_SHELLCHECK_SEVERITY=style ./gate.sh
+# Severity note: v0 defaulted to "warning" while loop/run.sh carried info-level
+# findings; those were cleaned and the default was raised to "style" (strictest,
+# the intended end state) per D-003 (2026-06-06). Override anytime:
+#   GATE_SHELLCHECK_SEVERITY=warning ./gate.sh
 #
 # Exit codes: 0 all checks passed · 1 a check failed · 2 a required tool missing.
 
@@ -43,7 +44,7 @@ if ! command -v shellcheck >/dev/null 2>&1; then
   exit 2
 fi
 
-mapfile -d '' sh_files < <(find . -type f -name '*.sh' -not -path './.git/*' -print0)
+mapfile -d '' sh_files < <(find . -type f -name '*.sh' -not -path './.git/*' -not -path './.cascade/*' -print0)
 
 if [ "${#sh_files[@]}" -eq 0 ]; then
   echo "[gate] shellcheck: no .sh files found."
@@ -58,17 +59,33 @@ else
 fi
 
 # --- NOTES.md append-only guard ----------------------------------------------
-# Memory must not shrink: fail if the working tree deletes more than
-# GATE_NOTES_MAX_DELETIONS lines from NOTES.md relative to HEAD.
+# Memory must not shrink. Fails CLOSED (audit fix 1.2, 2026-07-02): anchored to HEAD
+# (not the index, so `git rm --cached` can't skip it), absent/untracked worktree file
+# fails, a binary rewrite (numstat '-') fails, and the deletion tolerance is capped at
+# half the file's HEAD line count so a full wipe of a small file fails too.
 NOTES_MAX_DEL="${GATE_NOTES_MAX_DELETIONS:-20}"
-if git rev-parse HEAD >/dev/null 2>&1 && git ls-files --error-unmatch NOTES.md >/dev/null 2>&1; then
-  notes_del="$(git diff HEAD --numstat -- NOTES.md | awk '{print $2}')"
-  if [[ "${notes_del:-0}" =~ ^[0-9]+$ ]] && [ "${notes_del:-0}" -gt "$NOTES_MAX_DEL" ]; then
-    echo "[gate] NOTES.md guard: FAIL — $notes_del lines deleted (max $NOTES_MAX_DEL)." >&2
-    echo "[gate] NOTES.md is append-only loop memory; a rewrite destroys it." >&2
+if git rev-parse HEAD >/dev/null 2>&1 && git cat-file -e HEAD:NOTES.md 2>/dev/null; then
+  if [ ! -f NOTES.md ]; then
+    echo "[gate] NOTES.md guard: FAIL — tracked in HEAD but missing from the worktree." >&2
+    fail=1
+  elif ! git ls-files --error-unmatch NOTES.md >/dev/null 2>&1; then
+    echo "[gate] NOTES.md guard: FAIL — tracked in HEAD but removed from the index (git rm --cached?)." >&2
     fail=1
   else
-    echo "[gate] NOTES.md guard: OK (${notes_del:-0} deletions)."
+    notes_del="$(git diff HEAD --numstat -- NOTES.md | awk '{print $2}')"
+    notes_head_lines="$(git show HEAD:NOTES.md | wc -l | tr -d '[:space:]')"
+    notes_tol="$NOTES_MAX_DEL"
+    if [ $(( notes_head_lines / 2 )) -lt "$notes_tol" ]; then notes_tol=$(( notes_head_lines / 2 )); fi
+    if ! [[ "${notes_del:-0}" =~ ^[0-9]+$ ]]; then
+      echo "[gate] NOTES.md guard: FAIL — non-numeric deletion count '${notes_del}' (binary rewrite?)." >&2
+      fail=1
+    elif [ "${notes_del:-0}" -gt "$notes_tol" ]; then
+      echo "[gate] NOTES.md guard: FAIL — $notes_del lines deleted (max $notes_tol for a ${notes_head_lines}-line file)." >&2
+      echo "[gate] NOTES.md is append-only loop memory; a rewrite destroys it." >&2
+      fail=1
+    else
+      echo "[gate] NOTES.md guard: OK (${notes_del:-0} deletions)."
+    fi
   fi
 fi
 
