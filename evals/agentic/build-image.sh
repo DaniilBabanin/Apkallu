@@ -34,7 +34,10 @@ CONSOLE="$BUILD/console.log"
 DISK_SIZE="30G"     # virtual; qcow2 stays sparse. Headroom for OpenHands deps + docker images.
 MEM_MB="6144"
 VCPUS="4"
-SSH_PORT="2222"
+# PID-derived so concurrent builds don't collide on one hostfwd port (same trick as
+# lib/pg.sh's bridge port); env-overridable. A rare residual clash makes qemu exit
+# early, which the SSH-wait loop reports ("qemu exited early").
+SSH_PORT="${SSH_PORT:-$(( 22200 + ( $$ % 1000 ) ))}"
 SSH_HOST="127.0.0.1"
 
 log() { printf '[build-image] %s\n' "$*"; }
@@ -178,6 +181,7 @@ echo "--- openhands agent-server ---"; ssh_agent "OPENHANDS_SUPPRESS_BANNER=1 /o
 echo "--- docker ---"; ssh_agent "docker run --rm hello-world >/dev/null 2>&1 && echo 'docker OK' || echo 'docker FAIL'" || fail=1
 
 if [ "$fail" -ne 0 ]; then
+  trap - EXIT   # keep the promise below: the EXIT trap would kill the VM die leaves for inspection
   die "verification failed — VM left running on port $SSH_PORT for inspection (console: $CONSOLE)"
 fi
 log "verification passed."

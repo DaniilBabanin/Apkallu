@@ -97,7 +97,16 @@ class Handler(BaseHTTPRequestHandler):
             up = conn(UPSTREAM, timeout=TIMEOUT)
             up.request(method, path, body=body, headers=headers)  # http.client sets Host + Content-Length
             resp = up.getresponse()
-            data = resp.read()                            # stream=False -> one JSON blob; read fully
+            # Bounded body (Content-Length, not chunked/SSE) -> the classic stream=False JSON
+            # blob: read it fully and forward as-is. Anything else (chunked, text/event-stream,
+            # close-delimited) is a stream: buffering it would deliver zero bytes until the
+            # generation ends and trip TIMEOUT on any >TIMEOUT gap between tokens — relay it
+            # incrementally below instead.
+            clen = resp.getheader("Content-Length")
+            te = (resp.getheader("Transfer-Encoding") or "").lower()
+            ctype = (resp.getheader("Content-Type") or "").lower()
+            streaming = clen is None or "chunked" in te or "text/event-stream" in ctype
+            data = None if streaming else resp.read()
         except Exception as e:                            # noqa: BLE001 — surface upstream failures as 502
             self.send_response(502)
             self.send_header("Content-Type", "text/plain")
@@ -111,9 +120,25 @@ class Handler(BaseHTTPRequestHandler):
             if k.lower() in STRIP:
                 continue
             self.send_header(k, v)
-        self.send_header("Content-Length", str(len(data)))
+        if data is not None:
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        # streaming: re-frame as chunked toward the VM (we are HTTP/1.1) and flush each piece
+        # as it arrives — read1 returns as soon as the upstream socket has bytes.
+        self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
-        self.wfile.write(data)
+        try:
+            while True:
+                chunk = resp.read1(65536)
+                if not chunk:
+                    break
+                self.wfile.write(b"%X\r\n" % len(chunk) + chunk + b"\r\n")
+                self.wfile.flush()
+            self.wfile.write(b"0\r\n\r\n")
+        except Exception:                                 # noqa: BLE001 — upstream died mid-stream:
+            self.close_connection = True                  # truncate so the client sees the drop
 
     def do_POST(self):
         self._forward("POST")

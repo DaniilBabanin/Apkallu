@@ -59,9 +59,13 @@ os.makedirs(os.path.join(HERE, "build"), exist_ok=True)  # runtime logs/locks li
 SSH_KEY = os.path.join(HERE, "ssh", "agent_id_ed25519")
 PROXY_PY = os.path.join(HERE, "egress_proxy.py")
 # inference host (LLM_BASE_URL host wins, else LLM_UPSTREAM_HOST); added to the allowlist only when
-# set — the local lane needs none.
-_UPSTREAM = urlsplit(os.environ["LLM_BASE_URL"]).hostname if os.environ.get("LLM_BASE_URL") \
-    else os.environ.get("LLM_UPSTREAM_HOST")
+# set — the local lane needs none. An explicit port (e.g. a local server at localhost:1234) is kept
+# as host:port — egress_proxy.py treats that as an exact-pair exception to its port pinning and
+# private-address block, so only that pair is reachable, never every port on the host.
+_UPSTREAM = os.environ.get("LLM_UPSTREAM_HOST")
+if os.environ.get("LLM_BASE_URL"):
+    _u = urlsplit(os.environ["LLM_BASE_URL"])
+    _UPSTREAM = (_u.hostname or "") + (f":{_u.port}" if _u.port else "")
 ALLOWLIST = "pypi.org,files.pythonhosted.org,github.com,codeload.github.com," \
             "objects.githubusercontent.com,raw.githubusercontent.com" \
             + ("," + _UPSTREAM if _UPSTREAM else "")  # inference host (restricted profile)
@@ -114,6 +118,14 @@ def _filter_xml(profile):
         # DHCP DISCOVER/REQUEST are broadcast, so match the server port (not the gateway IP) or
         # the drop-all (restricted/none) profiles never lease.
         "  <rule action='accept' direction='out' priority='50'><udp dstportstart='67' dstportend='67'/></rule>",
+        # IPv6 is dropped wholesale for EVERY profile: all rules below match IPv4 only and
+        # nwfilter ACCEPTS unmatched frames, while the guest always brings up an fe80 link-local
+        # address — so without this a restricted/none VM could reach host services bound to ::
+        # (sshd, libvirtd) via the gateway's fe80, or peer VMs on the bridge, bypassing the whole
+        # IPv4 policy (and RA/DHCPv6 appearing on the net would grant full egress). All
+        # host<->VM control traffic (SSH/rsync/DHCP/DNS) is IPv4, so a blanket inout drop costs
+        # nothing.
+        "  <rule action='drop' direction='inout' priority='45'><all-ipv6/></rule>",
     ]
     if profile == "open":
         # DNS to the gateway resolver (NEW queries)
@@ -249,32 +261,40 @@ def up(name, egress="open", mem=4096, vcpus=4):
     # An fcntl lock (cross-process — children are separate run_session.py processes) is held only
     # for these few seconds; the slow DHCP/SSH waits below run fully concurrently. Once virt-install
     # returns, our domain references the filter, so a peer's undefine fails harmlessly thereafter.
-    with open(os.path.join(HERE, "build", ".vm-up.lock"), "w") as _lk:
-        fcntl.flock(_lk, fcntl.LOCK_EX)
-        filt = _define_filter(egress)
-        # fresh overlay off the golden base
-        virsh("vol-create-as", POOL, overlay(name), "30G", "--format", "qcow2",
-              "--backing-vol", BASE_VOL, "--backing-vol-format", "qcow2")
-        sh(["virt-install", "--import", "--name", dom(name),
-            "--memory", f"{mem},maxmemory={mem}", "--vcpus", str(vcpus),
-            "--disk", f"vol={POOL}/{overlay(name)},bus=virtio",
-            "--network", f"network={NET},filterref={filt}",
-            "--osinfo", "detect=on,require=off",
-            "--graphics", "none", "--noautoconsole", "--transient"])
-    ip = _ip(name, wait=120)
-    if not ip:
-        raise SystemExit(f"{dom(name)}: no DHCP lease in 120s")
-    for _ in range(20):
-        if ssh(name, "true").returncode == 0:
-            break
-        time.sleep(3)
-    else:
-        raise SystemExit(f"{dom(name)}: SSH never came up at {ip}")
-    if egress == "restricted":
-        proxy = f"http://{GW}:{PROXY_PORT}"
-        env = (f"http_proxy={proxy}\nhttps_proxy={proxy}\n"
-               f"HTTP_PROXY={proxy}\nHTTPS_PROXY={proxy}\n")
-        ssh(name, f"echo {shlex.quote(env)} | sudo tee -a /etc/environment >/dev/null")
+    try:
+        with open(os.path.join(HERE, "build", ".vm-up.lock"), "w") as _lk:
+            fcntl.flock(_lk, fcntl.LOCK_EX)
+            filt = _define_filter(egress)
+            # fresh overlay off the golden base
+            virsh("vol-create-as", POOL, overlay(name), "30G", "--format", "qcow2",
+                  "--backing-vol", BASE_VOL, "--backing-vol-format", "qcow2")
+            sh(["virt-install", "--import", "--name", dom(name),
+                "--memory", f"{mem},maxmemory={mem}", "--vcpus", str(vcpus),
+                "--disk", f"vol={POOL}/{overlay(name)},bus=virtio",
+                "--network", f"network={NET},filterref={filt}",
+                "--osinfo", "detect=on,require=off",
+                "--graphics", "none", "--noautoconsole", "--transient"])
+        ip = _ip(name, wait=120)
+        if not ip:
+            raise SystemExit(f"{dom(name)}: no DHCP lease in 120s")
+        for _ in range(20):
+            if ssh(name, "true").returncode == 0:
+                break
+            time.sleep(3)
+        else:
+            raise SystemExit(f"{dom(name)}: SSH never came up at {ip}")
+        if egress == "restricted":
+            proxy = f"http://{GW}:{PROXY_PORT}"
+            env = (f"http_proxy={proxy}\nhttps_proxy={proxy}\n"
+                   f"HTTP_PROXY={proxy}\nHTTPS_PROXY={proxy}\n")
+            ssh(name, f"echo {shlex.quote(env)} | sudo tee -a /etc/environment >/dev/null")
+    except BaseException:
+        # A failure past vol-create-as strands a 30G overlay (and, past virt-install, a live
+        # domain) — the retry then dies on "volume already exists". destroy() is idempotent
+        # (every virsh call is check=False), so tear down before re-raising. BaseException on
+        # purpose: the timeouts above raise SystemExit, which is not an Exception subclass.
+        destroy(name)
+        raise
     print(f"{dom(name)} up at {ip} (egress={egress})")
     return ip
 
@@ -354,7 +374,9 @@ def reap():
             virsh("vol-delete", v, "--pool", POOL, check=False)
             print(f"deleted overlay {v}")
     if not names and _port_open(GW, PROXY_PORT):
-        subprocess.run(["pkill", "-f", "egress_proxy.py"], check=False)
+        # Scope the kill to the exact script path _ensure_proxy launched — a bare
+        # "egress_proxy.py" would also match editors/other checkouts running the file.
+        subprocess.run(["pkill", "-f", PROXY_PY], check=False)
         print("stopped egress proxy")
 
 

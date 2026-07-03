@@ -129,13 +129,16 @@ def main():
     proxy = None if local else ensure_proxy()   # local lane needs no auth proxy (a local server is keyless)
     print(f"[run_session] {sid}: booting fresh VM (lane={'local' if local else 'remote'} model={model})")
     vm.destroy(a.name)                      # guarantee a clean overlay
-    ip = vm.up(a.name, egress="open")
     meta = {"id": sid, "repo": repo, "model": model, "lane": "local" if local else "remote",
             "task": task, "task_chars": len(task),
             "timeout": a.timeout, "max_iterations": a.max_iterations, "verify_cmd": a.verify_cmd,
             "started": time.strftime("%Y-%m-%dT%H:%M:%S"), "extract_errors": []}
     started = time.time()
+    ip = None
     try:
+        # boot INSIDE the try: a standalone run (no dispatch reaper) must not leak a live VM
+        # when up() dies mid-boot — the finally below tears it down.
+        ip = vm.up(a.name, egress="open")
         vm.put_repo(a.name, repo, dest="workspace")
         # git scaffold: baseline commit (if needed) + agent-session branch; print baseline SHA.
         scaffold = (
@@ -193,41 +196,46 @@ def main():
                 meta["extract_errors"].append(f"{name}: {e}")
                 return None
 
-        # host-side backstop final commit (covers a hard-killed session_agent that never committed)
-        step("final_commit", lambda: _ssh(ip, "cd ~/workspace && git add -A && "
-                                               "git commit -q -m 'host final checkpoint' || true", timeout=60))
-        meta["head_sha"] = step("head_sha", lambda: (_ssh(ip,
-            "cd ~/workspace && git rev-parse HEAD").stdout or "").strip()) or None
-        meta["commits"] = step("commits", lambda: int((_ssh(ip,
-            "cd ~/workspace && git rev-list --count agent-session").stdout or "0").strip() or 0))
-        meta["diffstat"] = step("diffstat", lambda: (_ssh(ip,
-            f"cd ~/workspace && git diff {meta.get('baseline_sha')} HEAD --stat").stdout or "").strip())
-        if a.save_bundle:
-            step("repo_bundle", lambda: (_ssh(ip, "cd ~/workspace && git bundle create /tmp/repo.bundle --all"),
-                                         _scp_out(ip, "/tmp/repo.bundle", os.path.join(outdir, "repo.bundle"))))
-        step("session_patch", lambda: open(os.path.join(outdir, "session.patch"), "w").write(
-            _ssh(ip, f"cd ~/workspace && git diff {meta.get('baseline_sha')} HEAD", timeout=120).stdout or ""))
-        step("trajectory", lambda: _scp_out(ip, "/home/agent/out/trajectory.json",
-                                            os.path.join(outdir, "trajectory.json")))
+        if ip is None:
+            # boot never yielded an IP — nothing in the VM to extract; skip straight to
+            # meta/teardown (vm.up cleans its own partial boot; destroy below is idempotent)
+            meta["extract_errors"].append("vm boot failed — nothing to extract")
+        else:
+            # host-side backstop final commit (covers a hard-killed session_agent that never committed)
+            step("final_commit", lambda: _ssh(ip, "cd ~/workspace && git add -A && "
+                                                   "git commit -q -m 'host final checkpoint' || true", timeout=60))
+            meta["head_sha"] = step("head_sha", lambda: (_ssh(ip,
+                "cd ~/workspace && git rev-parse HEAD").stdout or "").strip()) or None
+            meta["commits"] = step("commits", lambda: int((_ssh(ip,
+                "cd ~/workspace && git rev-list --count agent-session").stdout or "0").strip() or 0))
+            meta["diffstat"] = step("diffstat", lambda: (_ssh(ip,
+                f"cd ~/workspace && git diff {meta.get('baseline_sha')} HEAD --stat").stdout or "").strip())
+            if a.save_bundle:
+                step("repo_bundle", lambda: (_ssh(ip, "cd ~/workspace && git bundle create /tmp/repo.bundle --all"),
+                                             _scp_out(ip, "/tmp/repo.bundle", os.path.join(outdir, "repo.bundle"))))
+            step("session_patch", lambda: open(os.path.join(outdir, "session.patch"), "w").write(
+                _ssh(ip, f"cd ~/workspace && git diff {meta.get('baseline_sha')} HEAD", timeout=120).stdout or ""))
+            step("trajectory", lambda: _scp_out(ip, "/home/agent/out/trajectory.json",
+                                                os.path.join(outdir, "trajectory.json")))
 
-        def _save_final():
-            tp = os.path.join(outdir, "trajectory.json")
-            if not os.path.exists(tp):
-                return
-            final, headline = _extract_final(tp)
-            if final:
-                open(os.path.join(outdir, "final.md"), "w").write(final)
-                meta["final_headline"] = headline
-        step("final", _save_final)
-        rj = step("result_json", lambda: _scp_out(ip, "/home/agent/out/result.json",
-                                                  os.path.join(outdir, "result.json")))
-        # isolation invariant (light): no host FS passthrough mount visible in the VM
-        meta["isolation_no_hostfs"] = step("isolation", lambda: int((_ssh(ip,
-            "mount | grep -Ec '9p|virtiofs' || true").stdout or "0").strip() or 0) == 0)
-        if a.verify_cmd:
-            vr = step("verify", lambda: _ssh(ip, f"cd ~/workspace && {a.verify_cmd}", timeout=120))
-            if vr is not None:
-                meta["verify"] = {"exit": vr.returncode, "tail": "\n".join((vr.stdout or "").splitlines()[-8:])}
+            def _save_final():
+                tp = os.path.join(outdir, "trajectory.json")
+                if not os.path.exists(tp):
+                    return
+                final, headline = _extract_final(tp)
+                if final:
+                    open(os.path.join(outdir, "final.md"), "w").write(final)
+                    meta["final_headline"] = headline
+            step("final", _save_final)
+            rj = step("result_json", lambda: _scp_out(ip, "/home/agent/out/result.json",
+                                                      os.path.join(outdir, "result.json")))
+            # isolation invariant (light): no host FS passthrough mount visible in the VM
+            meta["isolation_no_hostfs"] = step("isolation", lambda: int((_ssh(ip,
+                "mount | grep -Ec '9p|virtiofs' || true").stdout or "0").strip() or 0) == 0)
+            if a.verify_cmd:
+                vr = step("verify", lambda: _ssh(ip, f"cd ~/workspace && {a.verify_cmd}", timeout=120))
+                if vr is not None:
+                    meta["verify"] = {"exit": vr.returncode, "tail": "\n".join((vr.stdout or "").splitlines()[-8:])}
 
         # status: prefer the in-VM result.json; else partial (we extracted whatever exists)
         rp = os.path.join(outdir, "result.json")
