@@ -109,16 +109,19 @@ act_start() {
 
 act_stop() {
   confirm "STOP scheduler + loop" || { notify "cancelled"; return 0; }
-  pkill -f 'loop/scheduler\.sh' 2>/dev/null || true
-  pkill -f 'loop/run\.sh' 2>/dev/null || true
+  # interpreter invocations only — never kill an editor/tail whose cmdline mentions the path
+  pkill -f '(^|/)bash [^ ]*loop/scheduler\.sh( |$)' 2>/dev/null || true
+  pkill -f '(^|/)bash [^ ]*loop/run\.sh( |$)' 2>/dev/null || true
   notify "stop signal sent"
 }
 
 act_dispatch() {
   confirm "dispatch next unit (spends quota)" || { notify "cancelled"; return 0; }
-  local out
-  out="$(./loop/cascade.sh dispatch 2>&1 | tail -1)"
-  notify "dispatch: $out"
+  local out rc=0
+  # dispatch returns non-zero for ordinary outcomes (nothing ready etc.) — under set -e a bare
+  # assignment would kill the cockpit, so capture the rc and surface it via notify instead.
+  out="$(./loop/cascade.sh dispatch 2>&1 | tail -1)" || rc=$?
+  notify "dispatch: ${out:-rc=$rc}"
 }
 
 act_reset() {
@@ -126,8 +129,9 @@ act_reset() {
   id="$(prompt_line "reset unit id: ")"
   [ -n "$id" ] || { notify "cancelled"; return 0; }
   confirm "reset $id (drops its worktree + branch)" || { notify "cancelled"; return 0; }
-  out="$(./loop/cascade.sh reset "$id" 2>&1 | tail -1)"
-  notify "reset: $out"
+  local rc=0
+  out="$(./loop/cascade.sh reset "$id" 2>&1 | tail -1)" || rc=$?
+  notify "reset: ${out:-rc=$rc}"
 }
 
 act_answer() {
@@ -137,8 +141,11 @@ act_answer() {
   verdict="$(prompt_line "verdict (yes/no/always/free text): ")"
   [ -n "$verdict" ] || { notify "cancelled"; return 0; }
   note="$(prompt_line "note (optional, enter to skip): ")"
-  out="$(./local/decide.sh apply "$id" "$verdict" "$note" 2>&1 | tail -1)"
-  notify "answered $id: $out"
+  # apply returns 2 (unknown id) / 3 (already answered) SILENTLY — keep the cockpit alive and
+  # show the rc instead of dying on the assignment (set -e).
+  local rc=0
+  out="$(./local/decide.sh apply "$id" "$verdict" "$note" 2>&1 | tail -1)" || rc=$?
+  notify "answered $id: ${out:-rc=$rc}"
 }
 
 # Attach to a running agentic work VM: v = interactive shell, f = follow live session events.

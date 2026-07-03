@@ -20,8 +20,8 @@
 #                               worker (loop/run.sh /goal, overridable via WORKER_CMD) there.
 #                               Respects the <=5 concurrency ceiling (cascade.md §Concurrency).
 #                               --profile <local|online|mixed> injects the in-sandbox worker
-#                               env so the nested claude spawns correctly (D-007; see profile_env
-#                               + org/profiles.md). Omitted = ambient env (back-compat).
+#                               env so the nested claude spawns correctly (D-007; see
+#                               profile_env). Omitted = ambient env (back-compat).
 #
 #   reset <id>                  Release a failed/stuck unit for a clean retry: remove its worktree
 #                               + branch + claim (the diagnostic log under .cascade/logs/ is kept),
@@ -216,19 +216,27 @@ escalate() {
   local recommended="${5:-(a) — usually a transient/format miss; persistent failure means (c).}"
   local defnote="${6:-default = skip this instruction, keep cascade alive}"
   local id today apply
-  id="$(next_decision_id)"
   today="$(date +%F)"
   apply="$(date -d '+3 days' +%F 2>/dev/null || date +%F)"
   mkdir -p director
-  {
-    printf '\n## %s — %s\n' "$id" "$title"
-    printf '**Asked:** %s · **Default applies:** %s → %s\n' "$today" "$apply" "$defnote"
-    printf '**Trigger:** %s\n' "$body"
-    printf '**Question:** %s\n' "$question"
-    printf '**Options:** %s\n' "$options"
-    printf '**Recommended default:** %s\n' "$recommended"
-    printf '**Answer:**\n'
-  } >> director/DECISIONS.md
+  # id-mint + append under an flock (cf. local/queue.sh with_lock): concurrent escalations
+  # (parallel dispatchers / the loop) must not mint the same D-NNN. The subshell prints the
+  # minted id so the caller can log it.
+  id="$(
+    ( flock -x 9
+      new_id="$(next_decision_id)"
+      {
+        printf '\n## %s — %s\n' "$new_id" "$title"
+        printf '**Asked:** %s · **Default applies:** %s → %s\n' "$today" "$apply" "$defnote"
+        printf '**Trigger:** %s\n' "$body"
+        printf '**Question:** %s\n' "$question"
+        printf '**Options:** %s\n' "$options"
+        printf '**Recommended default:** %s\n' "$recommended"
+        printf '**Answer:**\n'
+      } >> director/DECISIONS.md
+      printf '%s' "$new_id"
+    ) 9>director/DECISIONS.md.lock
+  )"
   echo "[cascade] escalated $id — $title" >&2
 }
 
@@ -256,7 +264,7 @@ escalate() {
 #      the worker rides the director's own login. Resolves UNSANDBOXED only (the sandbox denyReads
 #      ~/.claude → empty here, fall through). Needs jq. This is the short-lived ACCESS token (no
 #      in-worker refresh) — fine for short units; for long runs prefer the refresh-capable config-dir
-#      copy (org/profiles.md §Token handling). Prints "" if none.
+#      copy (D-018). Prints "" if none.
 HOST_CREDENTIALS_FILE="${AGENCY_HOST_CREDENTIALS:-$HOME/.claude/.credentials.json}"
 resolve_oauth_token() {
   if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
@@ -265,7 +273,9 @@ resolve_oauth_token() {
   fi
   local f="${AGENCY_OAUTH_TOKEN_FILE:-$HOME/.config/agency/oauth-token}"
   if [ -f "$f" ]; then
-    local t; t="$(grep -m1 -E '^[^#[:space:]]' "$f" 2>/dev/null | tr -d '[:space:]' || true)"
+    # First field only: strip at the first whitespace so a trailing inline comment
+    # ("token  # prod") is dropped instead of glued onto the token.
+    local t; t="$(awk '/^[^#[:space:]]/ { print $1; exit }' "$f" 2>/dev/null || true)"
     if [ -n "$t" ]; then printf '%s' "$t"; return 0; fi
   fi
   if [ -r "$HOST_CREDENTIALS_FILE" ] && command -v jq >/dev/null 2>&1; then
@@ -304,7 +314,7 @@ profile_env() {
     mixed)
       # Cloud main (OAuth) + local evaluator/subagent tier via the default-haiku model id.
       # NOTE: a single ANTHROPIC_BASE_URL can't split cloud-main / local-haiku on its own — this
-      # is the unverified piece (see org/profiles.md + D-008); the env is assembled as designed.
+      # is the unverified piece (see D-008); the env is assembled as designed.
       printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\nANTHROPIC_DEFAULT_HAIKU_MODEL=%s\n' "$tok" "$CASCADE_LOCAL_MODEL" ;;
   esac
 }

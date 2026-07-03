@@ -275,7 +275,9 @@ main_run() {
       notify "agency scheduler: backlog empty, stopping"
       break
     fi
-    if pgrep -f 'loop/run\.sh' >/dev/null 2>&1; then
+    # Match only real interpreter invocations (`bash …/loop/run.sh`), not any cmdline that
+    # merely mentions the path (`vim loop/run.sh`, `tail -f …/loop/run.sh`).
+    if pgrep -f '(^|/)bash [^ ]*loop/run\.sh( |$)' >/dev/null 2>&1; then
       log "a loop/run.sh is already running — waiting, not racing it."
       sleep 300
       continue

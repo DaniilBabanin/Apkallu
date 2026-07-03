@@ -43,6 +43,7 @@ _pg_init() {
       "PROXY:localhost:${PG_HOST}:${target_port},proxyport=${CLAUDE_CODE_HOST_HTTP_PROXY_PORT}" \
       >/dev/null 2>&1 &
     PG_BRIDGE_PID="$!"
+    _pg_install_exit_trap
     sleep 1
   fi
   command -v psql >/dev/null 2>&1 || return 0
@@ -54,7 +55,24 @@ _pg_init() {
 _pg_cleanup() {
   [ -n "${PG_BRIDGE_PID:-}" ] && kill "${PG_BRIDGE_PID}" 2>/dev/null || true
 }
-trap '_pg_cleanup' EXIT
+
+# Register _pg_cleanup on EXIT WITHOUT clobbering a pre-existing trap: capture the caller's
+# trap (if any), recover its raw command with one controlled parse round, and chain it after
+# the cleanup. Called only when a bridge actually started (no bridge -> nothing to clean up,
+# no trap touched), so plain sourcing never disturbs the caller's EXIT handling.
+_PG_PREV_EXIT_CMD=""
+_pg_install_exit_trap() {
+  local prev
+  local -a parsed=()
+  prev="$(trap -p EXIT)"        # e.g. trap -- '<shell-quoted cmd>' EXIT — or empty
+  if [ -n "$prev" ]; then
+    eval "parsed=( $prev )"     # one parse round: parsed[2] = the raw original command
+    _PG_PREV_EXIT_CMD="${parsed[2]}"
+    trap '_pg_cleanup; eval "$_PG_PREV_EXIT_CMD"' EXIT
+  else
+    trap '_pg_cleanup' EXIT
+  fi
+}
 
 # pg_query <sql> — run a query, print tuples (unaligned, no header); rc 1 if PG unavail.
 # Raw-SQL interface: callers pass CONSTANT statements only, never interpolated data.
