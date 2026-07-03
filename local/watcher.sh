@@ -27,6 +27,8 @@
 #   WATCHER_DISK_PCT    repo-fs use% that warns (default 90); WATCHER_DISK_CRIT crits (default 97).
 #   WATCHER_VRAM_PCT    GPU memory use% that warns (default 95).
 #   WATCHER_STALL_SECS  loop-alive-but-no-commit age in seconds that warns (default 2700 = 45min).
+#   WATCHER_HEARTBEAT_URL  dead-man switch: GET-pinged once per run tick; point at a
+#                          healthchecks.io check so a silently-dead watcher raises an alert.
 #   REALERT_SECS        re-ping an UNCHANGED alert only after this many seconds (default 14400 = 4h).
 #   STATE_DIR           dedup state dir (default: ${XDG_STATE_HOME:-~/.local/state}/agency-watcher).
 #   WATCHER_NOW         override "today" as YYYY-MM-DD (for testing the deadline check).
@@ -51,12 +53,16 @@ AGENCY_BACKUP_DIR="${AGENCY_BACKUP_DIR:-${HOME}/backups/agency}"
 AGENCY_BACKUP_DB="${AGENCY_BACKUP_DB:-agency}"
 
 CONCERNS=()
+SIGS=()
 HAVE_CRIT=0
 MODEL_DECISION="UNKNOWN"
 MODEL_REASON=""
 
-add_crit() { CONCERNS+=("[crit] $1"); HAVE_CRIT=1; }
-add_warn() { CONCERNS+=("[warn] $1"); }
+# $1 = human text (pushed body — may carry live numbers); $2 (optional) = dedup signature:
+# concern kind + threshold with the measured numbers stripped, so a growing counter or a
+# boundary-flickering percentage doesn't defeat the REALERT dedup. Defaults to $1.
+add_crit() { CONCERNS+=("[crit] $1"); SIGS+=("[crit] ${2:-$1}"); HAVE_CRIT=1; }
+add_warn() { CONCERNS+=("[warn] $1"); SIGS+=("[warn] ${2:-$1}"); }
 
 usage() {
   sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -124,9 +130,11 @@ check_disk() {
   pct="$(df -P "$REPO_DIR" 2>/dev/null | awk 'NR==2 { gsub(/%/,"",$5); print $5 }')"
   [[ "$pct" =~ ^[0-9]+$ ]] || return 0
   if [ "$pct" -ge "$WATCHER_DISK_CRIT" ]; then
-    add_crit "disk ${pct}% full on repo filesystem (>= ${WATCHER_DISK_CRIT}%) — commits may fail"
+    add_crit "disk ${pct}% full on repo filesystem (>= ${WATCHER_DISK_CRIT}%) — commits may fail" \
+             "disk >= ${WATCHER_DISK_CRIT}% full on repo filesystem"
   elif [ "$pct" -ge "$WATCHER_DISK_PCT" ]; then
-    add_warn "disk ${pct}% full on repo filesystem (>= ${WATCHER_DISK_PCT}%)"
+    add_warn "disk ${pct}% full on repo filesystem (>= ${WATCHER_DISK_PCT}%)" \
+             "disk >= ${WATCHER_DISK_PCT}% full on repo filesystem"
   fi
 }
 
@@ -138,21 +146,24 @@ check_vram() {
          | awk -F'[, ]+' 'NR==1 && $2 > 0 { printf "%d", $1*100/$2 }')"
   [[ "$pct" =~ ^[0-9]+$ ]] || return 0
   if [ "$pct" -ge "$WATCHER_VRAM_PCT" ]; then
-    add_warn "VRAM ${pct}% used (>= ${WATCHER_VRAM_PCT}%) — a model may be stuck resident"
+    add_warn "VRAM ${pct}% used (>= ${WATCHER_VRAM_PCT}%) — a model may be stuck resident" \
+             "VRAM >= ${WATCHER_VRAM_PCT}% used"
   fi
 }
 
 # --- check: loop alive but not committing (possible stall) ------------------
 check_stall() {
   command -v pgrep >/dev/null 2>&1 || return 0
-  pgrep -f 'loop/run\.sh' >/dev/null 2>&1 || return 0   # loop not running -> nothing to stall
+  # interpreter invocations only — a `vim loop/run.sh` must not count as a running loop
+  pgrep -f '(^|/)bash [^ ]*loop/run\.sh( |$)' >/dev/null 2>&1 || return 0   # loop not running -> nothing to stall
   local last now age
   last="$(git log -1 --format=%ct 2>/dev/null || true)"
   [[ "$last" =~ ^[0-9]+$ ]] || return 0
   now="$(date +%s)"
   age=$(( now - last ))
   if [ "$age" -ge "$WATCHER_STALL_SECS" ]; then
-    add_warn "loop running but no commit in $(( age / 60 ))min (possible stall)"
+    add_warn "loop running but no commit in $(( age / 60 ))min (possible stall)" \
+             "loop running but no commit >= ${WATCHER_STALL_SECS}s (possible stall)"
   fi
 }
 
@@ -196,10 +207,12 @@ push_ntfy() {
   body=""
   if [ -n "$MODEL_REASON" ]; then body="${MODEL_REASON}"$'\n'; fi
   body="${body}$(printf '%s\n' "${CONCERNS[@]}")"
+  # --data-raw, not -d: the body starts with model output, and a body beginning with "@" would
+  # make -d read that local file and post it to the public topic (prompt-injection exfil).
   curl -s -o /dev/null --max-time 10 \
     -H "Title: ${title}" \
     -H "Priority: ${prio}" \
-    -d "$(printf '%s' "$body" | head -c 1200)" \
+    --data-raw "$(printf '%s' "$body" | head -c 1200)" \
     "https://ntfy.sh/${NTFY_TOPIC}" || true
   echo "[watcher] pushed alert to ntfy.sh/${NTFY_TOPIC}"
 }
@@ -210,6 +223,7 @@ push_ntfy() {
 # time-of-day check, so it fires at the first 15-min tick after midnight.
 do_backup() {
   local state last_date out size
+  mkdir -p "$STATE_DIR" 2>/dev/null || true   # dedup state must be writable on the healthy path too
   state="$STATE_DIR/last_backup_date"
   last_date="$(cat "$state" 2>/dev/null || true)"
   [ "$last_date" = "$TODAY" ] && { echo "[watcher] backup: already ran today — skip."; return 0; }
@@ -236,7 +250,8 @@ maybe_ping() {
   mkdir -p "$STATE_DIR" 2>/dev/null || true
   local state sig now prev_sig prev_ts
   state="$STATE_DIR/last_alert"
-  sig="$(printf '%s\n' "${CONCERNS[@]}" | sort | hash_stdin)"
+  # hash the normalized signatures, not the display text — an ongoing condition keeps one sig
+  sig="$(printf '%s\n' "${SIGS[@]}" | sort | hash_stdin)"
   now="$(date +%s)"
   prev_sig=""; prev_ts=0
   if [ -f "$state" ]; then
@@ -256,6 +271,11 @@ maybe_ping() {
 # mode = run | check. Returns 10 in check mode when it would alert (else 0); 0 in run mode.
 main_cycle() {
   local mode="$1"
+  # dead-man switch: the watcher can alert on everything except its own death — an external
+  # heartbeat monitor fires when these pings STOP. run mode only (check is the TUI probe).
+  if [ "$mode" = "run" ] && [ -n "${WATCHER_HEARTBEAT_URL:-}" ]; then
+    curl -fsS --max-time 10 -o /dev/null "$WATCHER_HEARTBEAT_URL" || true
+  fi
   check_decisions
   check_disk
   check_vram

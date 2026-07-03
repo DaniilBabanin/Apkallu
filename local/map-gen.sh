@@ -37,7 +37,8 @@ while IFS= read -r f; do
   [ -n "$desc" ] || desc='(no description)'
   # shellcheck disable=SC2016  # backticks are literal markdown code-span syntax, not command subst
   printf -- '- `%s` — %s\n' "$rel" "$desc"
-done < <(find . -type f -name '*.sh' -not -path './.git/*' | sort)
+done < <(find . -type f -name '*.sh' -not -path './.git/*' \
+           -not -path './.cascade/*' -not -path './evals/agentic/build/*' | sort)
 printf '\n'
 
 # --- (2) NOTES.md index: one pointer per "## " section ----------------------

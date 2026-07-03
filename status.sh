@@ -230,7 +230,7 @@ printf '  last commit: %s\n' "$(git log -1 --format='%h %s (%cr)' 2>/dev/null ||
 if [ -f "$STATE_DIR/scheduler.log" ]; then
   printf '  scheduler:   %s\n' "$(tail -1 "$STATE_DIR/scheduler.log")"
 fi
-dirty="$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+dirty="$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ' || true)"
 printf '  working tree: %s changed/untracked file(s)\n' "${dirty:-0}"
 
 exit 0

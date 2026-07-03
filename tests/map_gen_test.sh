@@ -25,6 +25,18 @@ want() {  # desc, haystack, needle
   fi
 }
 
+want_not() {  # desc, haystack, needle
+  local desc="$1" hay="$2" needle="$3"
+  if printf '%s' "$hay" | grep -qF -- "$needle"; then
+    echo "  FAIL: $desc" >&2
+    echo "    expected NOT to find: $needle" >&2
+    fail=$((fail + 1))
+  else
+    echo "  PASS: $desc"
+    pass=$((pass + 1))
+  fi
+}
+
 ROOT="$(mktemp -d)"
 trap 'rm -rf "$ROOT"' EXIT
 
@@ -40,6 +52,15 @@ cat > "$ROOT/zzz.sh" <<'EOF'
 #!/usr/bin/env bash
 # plain comment, no em-dash here
 echo zeta
+EOF
+
+# Throwaway copies that must NOT be indexed: a cascade worktree clone of aaa.sh
+# (would duplicate every script per active unit) and a build artifact.
+mkdir -p "$ROOT/.cascade/worktrees/w1" "$ROOT/evals/agentic/build"
+cp "$ROOT/aaa.sh" "$ROOT/.cascade/worktrees/w1/aaa.sh"
+cat > "$ROOT/evals/agentic/build/artifact.sh" <<'EOF'
+#!/usr/bin/env bash
+# artifact.sh — generated build artifact, not source.
 EOF
 
 cat > "$ROOT/NOTES.md" <<'EOF'
@@ -82,6 +103,19 @@ want "has Decisions index"   "$OUT" "## Decisions index"
 want "Files: aaa.sh uses its em-dash header" "$OUT" '`aaa.sh` — aaa.sh — does the alpha thing.'
 # shellcheck disable=SC2016  # backticks are literal markdown in the expected output, not command subst
 want "Files: zzz.sh falls back to first comment" "$OUT" '`zzz.sh` — plain comment, no em-dash here'
+
+# (1b) Files: cascade worktrees and build artifacts are excluded, source copy kept.
+want_not "Files: no .cascade worktree entries"      "$OUT" '.cascade/'
+want_not "Files: no evals/agentic/build entries"    "$OUT" 'evals/agentic/build/'
+# shellcheck disable=SC2016  # backticks are literal markdown in the expected output, not command subst
+aaa_count="$(printf '%s\n' "$OUT" | grep -cF -- '`aaa.sh`' || true)"
+if [ "$aaa_count" = "1" ]; then
+  echo "  PASS: Files: exactly one aaa.sh entry (worktree copy not duplicated)"
+  pass=$((pass + 1))
+else
+  echo "  FAIL: Files: expected exactly one aaa.sh entry, got $aaa_count" >&2
+  fail=$((fail + 1))
+fi
 
 # (2) NOTES index: line-pointer + title per section.
 want "NOTES: first section pointer"  "$OUT" "first section"

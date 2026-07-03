@@ -275,9 +275,10 @@ fi
 if [ -n "${NTFY_TOPIC:-}" ]; then
   MSG="$(printf 'backlog %s open / %s done · decisions: %s\n%s' \
     "$open_count" "$done_count" "$OPEN_DECISION_IDS" "$BODY")"
+  # --data-raw, not -d: a body starting with "@" must post literally, never read a local file
   curl -s -o /dev/null --max-time 10 \
     -H "Title: agency digest" \
-    -d "$(printf '%s' "$MSG" | head -c 1200)" \
+    --data-raw "$(printf '%s' "$MSG" | head -c 1200)" \
     "https://ntfy.sh/${NTFY_TOPIC}" || true
   echo "[digest] pushed to ntfy.sh/${NTFY_TOPIC}"
 fi
