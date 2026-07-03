@@ -30,6 +30,8 @@ open_decisions() {
       sub(/^## D-[0-9]+[[:space:]]+—[[:space:]]+/, "", title)
       next
     }
+    id == ""             { next }
+    /^---[[:space:]]*$/  { flush(); next }
     /^\*\*Answer:\*\*/ { inans=1; t=$0; sub(/^\*\*Answer:\*\*/, "", t); ans=ans t; next }
     inans { ans = ans $0 }
     END { flush() }
@@ -60,7 +62,8 @@ if [ "${DECIDE_LIB:-0}" = "1" ]; then
 fi
 
 case "${1:-}" in
-  pending) open_decisions "$DECISIONS_FILE" ;;
+  pending) [ -f "$DECISIONS_FILE" ] || exit 0   # no decisions file = none pending, not an error
+           open_decisions "$DECISIONS_FILE" ;;
   apply)   record_answer "$DECISIONS_FILE" "${2:?id}" "${3:?verdict}" "${4:-}" "$(date +%F)" ;;
   *) echo "usage: decide.sh pending|apply D-NNN <verdict> [note]" >&2; exit 64 ;;
 esac

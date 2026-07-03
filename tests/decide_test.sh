@@ -64,6 +64,42 @@ record_answer "$TD/b.md" D-999 yes "" 2026-06-07; expect_eq "apply: missing id r
 record_answer "$TD/b.md" D-102 yes "" 2026-06-07; expect_eq "apply: answered rc 3" "$?" "3"
 expect_eq "apply: untouched on errors" "$(cmp -s "$TD/b.md" "$TD/b.orig" && echo same)" "same"
 
+# --- '---'-separated entries (the canonical block separator; see tests/status_test.sh fixture).
+# The separator used to be absorbed as answer text, so an OPEN entry followed by '---' was
+# reported as answered: pending omitted it and apply returned rc 3.
+mksep() { cat > "$1" << 'EOF'
+# Decisions Queue
+
+## D-201 — answered, before a separator
+**Question:** First?
+**Answer:** (a) — director 2026-06-06. ✅ RESOLVED
+
+---
+
+## D-202 — open, followed by a separator
+**Question:** Second?
+**Answer:**
+
+---
+
+## D-203 — answered, last entry
+**Question:** Third?
+**Answer:** (b) — director 2026-06-07.
+EOF
+}
+mksep "$TD/s.md"
+expect_eq "pending: --- separator not absorbed as answer" \
+  "$(open_decisions "$TD/s.md" | cut -f1 | tr '\n' ' ')" "D-202 "
+record_answer "$TD/s.md" D-202 yes "" 2026-07-02
+expect_eq "apply: --- separated open entry rc 0" "$?" "0"
+expect_eq "apply: --- fixture fully answered" "$(open_decisions "$TD/s.md")" ""
+
+# --- missing decisions file: `pending` is rc 0 / no output (fresh checkout defense).
+# Runs the CLI (DECIDE_LIB off) so the [ -f ] guard itself is exercised.
+out="$(DECIDE_LIB=0 DECISIONS_FILE="$TD/does-not-exist.md" ./local/decide.sh pending)"
+expect_eq "pending: missing file rc 0" "$?" "0"
+expect_eq "pending: missing file no output" "$out" ""
+
 echo
 echo "decide_test: $P passed, $F failed"
 [ "$F" -eq 0 ]
