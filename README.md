@@ -37,11 +37,12 @@ The mechanics are built and wired. How well it produces unattended work depends 
 it at and your backlog, so measure that on your own setup.
 
 ## What's here
-- `loop/`: iteration loop (`run.sh`), cascade orchestrator (`cascade.sh`), commit enforcement.
+- `loop/`: iteration loop (`run.sh`), cascade orchestrator (`cascade.sh`), scheduler
+  (`scheduler.sh`), commit enforcement.
 - `evals/agentic/`: the microVM lane. `vm.py` (lifecycle), `dispatch.py` (RAM-bounded parallel fanout),
   `run_session.py` (one session), `proxy.py` (keeps the inference key off the VM), `egress_proxy.py`
   (domain allowlist).
-- `local/`: ops. Scheduler, watcher, status, job queue, local-LLM loader, sandbox setup.
+- `local/`: ops. Watcher, status, job queue, local-LLM loader, sandbox setup.
 - `lib/` + `db/`: optional Postgres control plane (jobs + events).
 - `policy/`: routing, delegation, substrate guidance.
 - `tests/`: shell test suites.

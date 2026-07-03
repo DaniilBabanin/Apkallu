@@ -4,6 +4,10 @@
 # in its own throwaway repo (CASCADE_REPO override), so this repo's history is never touched.
 set -euo pipefail
 
+# hermetic like the gate (gate.sh exports AGENCY_PG_PORT=1): a reachable live PG must not
+# flip the PG-down assertions — override only when a check stubs its own psql.
+export AGENCY_PG_PORT="${AGENCY_PG_PORT:-1}"
+
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CASCADE="$SELF_DIR/loop/cascade.sh"
 TMP="$(mktemp -d)"

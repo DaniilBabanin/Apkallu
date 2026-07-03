@@ -46,6 +46,20 @@ assert_cfg "$M" "merge-keeps-existing" '.permissions.allow | index("Bash(ls:*)")
 assert_cfg "$M" "merge-unions-allow"   '.permissions.allow | index("Bash")'
 assert_cfg "$M" "merge-snippet-wins"   '.sandbox.enabled == true'
 
+# --- 2b. merge unions denyRead/allowedDomains (user's extra entries survive reinstall) ---
+mkdir -p "$TMP/merge2"
+cat >"$TMP/merge2/settings.json" <<'EOF'
+{"sandbox": {"filesystem": {"denyRead": ["~/.kube"]},
+             "network": {"allowedDomains": ["internal.example.com"]}}}
+EOF
+SANDBOX_SETTINGS_FILE="$TMP/merge2/settings.json" SANDBOX_SKIP_DEPS=1 \
+  local/sandbox-setup.sh install >/dev/null
+M2="$TMP/merge2/settings.json"
+assert_cfg "$M2" "merge-keeps-denyread"     '.sandbox.filesystem.denyRead | index("~/.kube")'
+assert_cfg "$M2" "merge-unions-denyread"    '.sandbox.filesystem.denyRead | index("~/.ssh")'
+assert_cfg "$M2" "merge-keeps-domain"       '.sandbox.network.allowedDomains | index("internal.example.com")'
+assert_cfg "$M2" "merge-unions-domain"      '.sandbox.network.allowedDomains | index("api.anthropic.com")'
+
 # --- 3. check subcommand exit codes ------------------------------------------
 set +e
 SANDBOX_SETTINGS_FILE="$TMP/fresh/settings.json" local/sandbox-setup.sh check >/dev/null 2>&1

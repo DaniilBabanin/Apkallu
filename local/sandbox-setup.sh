@@ -133,13 +133,18 @@ do_install() {
   mkdir -p "$(dirname "$SETTINGS_FILE")"
   if [ -f "$SETTINGS_FILE" ]; then
     # Deep-merge: existing settings kept, our snippet wins on conflicts — EXCEPT the
-    # permissions.allow/deny arrays, which are unioned (jq's * replaces arrays wholesale
-    # and would silently drop the user's own rules).
+    # permissions.allow/deny, sandbox denyRead, and network allowedDomains arrays, which
+    # are unioned (jq's * replaces arrays wholesale and would silently drop the user's
+    # own rules/entries on reinstall).
     local merged
     merged="$(jq -s '
       . as [$old, $new] | ($old * $new)
       | .permissions.allow = (($old.permissions.allow // []) + ($new.permissions.allow // []) | unique)
       | .permissions.deny  = (($old.permissions.deny  // []) + ($new.permissions.deny  // []) | unique)
+      | .sandbox.filesystem.denyRead =
+          (($old.sandbox.filesystem.denyRead // []) + ($new.sandbox.filesystem.denyRead // []) | unique)
+      | .sandbox.network.allowedDomains =
+          (($old.sandbox.network.allowedDomains // []) + ($new.sandbox.network.allowedDomains // []) | unique)
       ' "$SETTINGS_FILE" <(snippet))"
     printf '%s\n' "$merged" >"$SETTINGS_FILE"
     echo "[sandbox] merged sandbox config into existing $SETTINGS_FILE"

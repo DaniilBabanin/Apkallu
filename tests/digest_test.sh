@@ -7,6 +7,10 @@
 # elsewhere (NOTES 2026-06-06 digest entry).
 set -euo pipefail
 
+# hermetic like the gate (gate.sh exports AGENCY_PG_PORT=1): a reachable live PG must not
+# flip the PG-down assertions — override only when a check stubs its own psql.
+export AGENCY_PG_PORT="${AGENCY_PG_PORT:-1}"
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TD="$(mktemp -d)"
 trap 'rm -rf "$TD"' EXIT

@@ -3,6 +3,10 @@
 # affects the assertions. NO claude, NO network. Plus one live smoke run against this repo.
 set -euo pipefail
 
+# hermetic like the gate (gate.sh exports AGENCY_PG_PORT=1): a reachable live PG must not
+# flip the PG-down assertions — override only when a check stubs its own psql.
+export AGENCY_PG_PORT="${AGENCY_PG_PORT:-1}"
+
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATUS="$SELF_DIR/status.sh"
 TMP="$(mktemp -d)"

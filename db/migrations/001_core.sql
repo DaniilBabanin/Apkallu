@@ -142,7 +142,8 @@ LANGUAGE sql AS $$
   RETURNING true;
 $$;
 
--- fail_job: retry with exponential backoff (1,2,4,... minutes) until max_attempts, then
+-- fail_job: retry with exponential backoff (2,4,8,... minutes — power(2, attempt), and claim
+-- has already bumped attempt to 1 on the first try) until max_attempts, then
 -- dead-letter as 'failed'.
 CREATE FUNCTION fail_job(p_id uuid, p_claimer text, p_error text)
 RETURNS boolean
