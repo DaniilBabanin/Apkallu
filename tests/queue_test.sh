@@ -117,6 +117,47 @@ out="$(QUEUE_PS_JSON="$NONE" QUEUE_RUN_CMD='echo "SUBMIT model=$QUEUE_MODEL ctx=
 check "submit returns the task output on stdout" "SUBMIT model=google/gemma-4-e4b ctx=32768" "$out"
 check "submit is transient (entry removed)" "" "$(jq -r 'select(.id=="d1") | .id' "$QUEUE_FILE" 2>/dev/null)"
 
+# --- 14. atomic claim: two concurrent drains on ONE task run its payload exactly once --------
+reset_q
+"$Q" enqueue general --prompt "solo" --id r1 >/dev/null
+export RACE_LOG="$TD/race.log"
+: > "$RACE_LOG"
+# shellcheck disable=SC2016  # stub expands at run time, not here
+QUEUE_PS_JSON="$NONE" QUEUE_RUN_CMD='sleep 0.3; echo ran >> "$RACE_LOG"' "$Q" drain >/dev/null 2>&1 &
+race_p1=$!
+# shellcheck disable=SC2016  # stub expands at run time, not here
+QUEUE_PS_JSON="$NONE" QUEUE_RUN_CMD='sleep 0.3; echo ran >> "$RACE_LOG"' "$Q" drain >/dev/null 2>&1 &
+race_p2=$!
+wait "$race_p1" "$race_p2" || true
+check "concurrent drains: payload ran exactly once" "1" "$(wc -l < "$RACE_LOG" | tr -d ' ')"
+check "raced task ends done" "done" "$(jq -r 'select(.id=="r1") | .state' "$QUEUE_FILE")"
+
+# --- 15. recovery: a "running" task with a DEAD owner pid is requeued and re-picked ----------
+reset_q
+"$Q" enqueue general --prompt "orphan" --id o1 >/dev/null
+( : ) & dead_pid=$!
+wait "$dead_pid" || true
+mut="$TD/mut.ndjson"
+jq -c --argjson pid "$dead_pid" '.state="running" | .pid=$pid | .claimed_at=(now|floor)' \
+  "$QUEUE_FILE" > "$mut" && mv "$mut" "$QUEUE_FILE"
+pick="$(QUEUE_PS_JSON="$NONE" "$Q" next)"
+check "dead-owner running task re-picked by next" "o1	google/gemma-4-e4b" "$pick"
+check "dead-owner task requeued" "queued" "$(jq -r 'select(.id=="o1") | .state' "$QUEUE_FILE")"
+
+# --- 16. recovery: live owner inside the lease stays running; an expired lease is requeued ---
+reset_q
+"$Q" enqueue general --prompt "leased" --id l1 >/dev/null
+jq -c --argjson pid "$$" '.state="running" | .pid=$pid | .claimed_at=(now|floor)' \
+  "$QUEUE_FILE" > "$mut" && mv "$mut" "$QUEUE_FILE"
+if QUEUE_PS_JSON="$NONE" "$Q" next >/dev/null 2>&1; then
+  fail "live in-lease running task must not be re-picked"
+else
+  ok "live in-lease running task not re-picked"
+fi
+jq -c '.claimed_at = 100' "$QUEUE_FILE" > "$mut" && mv "$mut" "$QUEUE_FILE"
+pick="$(QUEUE_PS_JSON="$NONE" QUEUE_LEASE=60 "$Q" next)"
+check "expired-lease running task re-picked" "l1	google/gemma-4-e4b" "$pick"
+
 echo "---"
 echo "queue_test: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

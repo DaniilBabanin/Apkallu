@@ -24,7 +24,8 @@
 # Usage:
 #   ./local/queue.sh enqueue <class> [--prompt "…" | --cmd "…"] [--prio N] [--models "a,b"] [--ctx N]
 #   ./local/queue.sh submit <class> [enqueue-opts]  # enqueue + run NOW, print output (transient)
-#   ./local/queue.sh next                 # print id+model chosen by policy (no side effects)
+#   ./local/queue.sh next                 # print id+model chosen by policy (also requeues
+#                                         # running tasks whose owner died / lease expired)
 #   ./local/queue.sh run [id]             # run one task (default: policy pick)
 #   ./local/queue.sh drain [max]          # run until empty (or max tasks)
 #   ./local/queue.sh status | classes
@@ -43,6 +44,8 @@
 #   QUEUE_RUN_CMD     test seam: command run instead of the real chat call; gets
 #                     QUEUE_MODEL/QUEUE_CTX/QUEUE_PROMPT env (cascade.sh DECOMPOSE_CMD pattern)
 #   QUEUE_FORCE_PRIO  priority that forces a slot switch (default 9)
+#   QUEUE_LEASE       seconds a "running" claim may live past its claim time when the owner
+#                     pid is gone-unverifiable (default 7200 — the longest sanctioned payload)
 #   LMSTUDIO_BASE     chat endpoint base (default http://localhost:1234/v1)
 set -euo pipefail
 
@@ -52,6 +55,7 @@ LOCK_FILE="$QUEUE_FILE.lock"
 OUT_DIR="${QUEUE_OUT_DIR:-$HERE/queue-out}"
 BASE="${LMSTUDIO_BASE:-http://localhost:1234/v1}"
 FORCE_PRIO="${QUEUE_FORCE_PRIO:-9}"
+LEASE="${QUEUE_LEASE:-7200}"
 
 # Keep in sync with local/llm.sh (WARM_LLMS/BIG_SLOT) and policy/routing.md.
 WARM_SET="nvidia/nemotron-3-nano-4b google/gemma-4-e4b"
@@ -114,6 +118,43 @@ _set_state() { # _set_state <id> <state> [result]
     "$QUEUE_FILE" > "$tmp" && mv "$tmp" "$QUEUE_FILE"
 }
 
+_claim() { # _claim <id> — atomic claim; run under the flock (with_lock _claim <id>).
+  # ONE jq pass flips queued->running and stamps the owner (pid + claimed_at) so a crashed
+  # claim is recoverable (_recover_running). rc 0 = THIS pid owns the task (a task this pid
+  # pre-claimed at enqueue — cmd_submit — also counts); rc != 0 = lost the race, caller re-picks.
+  local tmp
+  tmp="$(mktemp)"
+  jq -c --arg id "$1" --argjson pid "$$" \
+    'if .id == $id and .state == "queued"
+     then .state = "running" | .pid = $pid | .claimed_at = (now | floor)
+     else . end' "$QUEUE_FILE" > "$tmp" && mv "$tmp" "$QUEUE_FILE"
+  jq -e --arg id "$1" --argjson pid "$$" \
+    'select(.id == $id and .state == "running" and .pid == $pid)' "$QUEUE_FILE" >/dev/null
+}
+
+_recover_running() { # requeue orphaned "running" tasks; run under the flock.
+  # A crash between _claim and done/failed used to strand the task in "running" forever.
+  # Dead (or unrecorded — pre-claim legacy) owner pid, or a claim older than QUEUE_LEASE,
+  # flips the task back to "queued" so next/drain re-pick it.
+  [ -f "$QUEUE_FILE" ] || return 0
+  local now id pid ts stale=""
+  now="$(date +%s)"
+  while IFS=$'\t' read -r id pid ts; do
+    [ -n "$id" ] || continue
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null || [ $((now - ${ts:-0})) -gt "$LEASE" ]; then
+      stale="$stale $id"
+    fi
+  done < <(jq -r 'select(.state == "running") | [.id, (.pid // ""), (.claimed_at // 0)] | @tsv' "$QUEUE_FILE")
+  [ -n "$stale" ] || return 0
+  local tmp
+  tmp="$(mktemp)"
+  jq -c --arg ids "$stale " \
+    '.id as $i
+     | if .state == "running" and ($ids | contains(" " + $i + " "))
+       then .state = "queued" | del(.pid, .claimed_at)
+       else . end' "$QUEUE_FILE" > "$tmp" && mv "$tmp" "$QUEUE_FILE"
+}
+
 _remove() { # _remove <id> — drop a task line (submit is transient: the caller already has the output)
   [ -f "$QUEUE_FILE" ] || return 0
   local tmp
@@ -147,6 +188,12 @@ cmd_enqueue() {
     --argjson ctx "$ctx" --argjson seq "$(($(date +%s%N) / 1000))" \
     '{id:$id, state:"queued", prio:$prio, class:$class, models:($models|split(",")),
       kind:$kind, payload:$payload, ctx:$ctx, seq:$seq}')"
+  # cmd_submit's pre-claim seam: append the task already claimed by THIS pid, so a
+  # concurrent drain can never grab it between submit's enqueue and its run.
+  if [ "${QUEUE_ENQUEUE_CLAIMED:-0}" = "1" ]; then
+    line="$(jq -c --argjson pid "$$" \
+      '.state = "running" | .pid = $pid | .claimed_at = (now | floor)' <<<"$line")"
+  fi
   with_lock _append "$line"
   echo "$id"
 }
@@ -156,6 +203,7 @@ _append() { printf '%s\n' "$1" >> "$QUEUE_FILE"; }
 # pick — the §5 policy. Prints "<id>\t<model>" or returns 1 when nothing is runnable.
 cmd_next() {
   local all loaded
+  with_lock _recover_running
   all="$(queued)"
   [ -n "$all" ] || return 1
   loaded="$(loaded_big)"
@@ -205,21 +253,29 @@ cmd_next() {
 cmd_run() {
   local id="${1:-}" model task
   if [ -n "$id" ]; then
-    task="$(jq -c --arg id "$id" 'select(.id == $id and .state == "queued")' "$QUEUE_FILE" | head -1)"
+    # explicit id: queued, or already claimed by THIS pid (cmd_submit pre-claims at enqueue)
+    task="$(jq -c --arg id "$id" --argjson pid "$$" \
+      'select(.id == $id and (.state == "queued" or (.state == "running" and .pid == $pid)))' \
+      "$QUEUE_FILE" | head -1)"
     [ -n "$task" ] || { echo "no queued task: $id" >&2; return 1; }
     model="$(loaded_big)"
     jq -e --arg m "$model" '.models | index($m)' <<<"$task" >/dev/null 2>&1 || model="$(jq -r '.models[0]' <<<"$task")"
+    with_lock _claim "$id" || { echo "lost claim on $id (another worker took it)" >&2; return 1; }
   else
+    # policy pick + atomic claim: a lost race (a concurrent drain claimed the same pick
+    # first) re-picks instead of double-running the payload on one task.
     local line
-    line="$(cmd_next)" || { echo "queue empty / nothing runnable" >&2; return 1; }
-    id="${line%%$'\t'*}"; model="${line##*$'\t'}"
+    while :; do
+      line="$(cmd_next)" || { echo "queue empty / nothing runnable" >&2; return 1; }
+      id="${line%%$'\t'*}"; model="${line##*$'\t'}"
+      with_lock _claim "$id" && break
+    done
     task="$(jq -c --arg id "$id" 'select(.id == $id)' "$QUEUE_FILE" | head -1)"
   fi
   local ctx kind payload
   ctx="$(jq -r .ctx <<<"$task")"
   kind="$(jq -r .kind <<<"$task")"
   payload="$(jq -r .payload <<<"$task")"
-  with_lock _set_state "$id" running
   mkdir -p "$OUT_DIR"
   local out="$OUT_DIR/$id.txt" rc=0
   if [ -n "${QUEUE_RUN_CMD:-}" ]; then
@@ -261,7 +317,7 @@ cmd_drain() {
 # by callers that need the answer inline (e.g. local/digest.sh). Honors QUEUE_RUN_CMD (tests).
 cmd_submit() {
   local id rc=0
-  id="$(cmd_enqueue "$@")" || return 1
+  id="$(QUEUE_ENQUEUE_CLAIMED=1 cmd_enqueue "$@")" || return 1
   cmd_run "$id" >&2 || rc=$?
   cat "$OUT_DIR/$id.txt" 2>/dev/null || true
   with_lock _remove "$id" || true
