@@ -77,10 +77,10 @@ git add -A
 git commit -qm "loop: nested done file"
 if commit_closed_task; then fail "nested-done -> not-closed"; else pass "nested-done -> not-closed"; fi
 
-# --- stall_decision: committed backlog_touched notes_changed project_mode ---
-chk() { # name expected committed backlog_touched notes_changed project_mode
+# --- stall_decision: committed backlog_touched notes_changed project_mode [gate_failed] ---
+chk() { # name expected committed backlog_touched notes_changed project_mode [gate_failed]
   local name="$1" want="$2" got
-  got="$(stall_decision "$3" "$4" "$5" "$6")"
+  got="$(stall_decision "$3" "$4" "$5" "$6" "${7:-0}")"
   if [ "$got" = "$want" ]; then pass "$name"; else fail "$name (got '$got' want '$want')"; fi
 }
 
@@ -97,6 +97,23 @@ chk "nothing-happened -> increment"        increment 0 0 0 0
 chk "external-commit -> reset"             reset     1 0 0 1
 chk "external-notes-only -> reset"         reset     0 0 1 1
 chk "external-nothing -> increment"        increment 0 0 0 1
+
+# gate_failed=1 forces increment: the harness's own gate-failure lesson append flips
+# notes_changed every red iteration — that must NOT reset the streak (audit fix 1.4), or
+# an LLM regenerating a different failing change each attempt evades STALL_MAX forever.
+chk "gate-fail+notes -> increment"         increment 0 0 1 0 1
+chk "gate-fail-no-notes -> increment"      increment 0 0 0 0 1
+chk "gate-fail dominates all-progress"     increment 1 1 1 0 1
+chk "gate-fail external-mode -> increment" increment 0 0 1 1 1
+chk "gate_failed omitted -> old behavior"  reset     0 0 1 0    # back-compat default
+
+# a red-gate STREAK: N consecutive gate-fails (each appending a NOTES lesson) must return
+# increment EVERY time, so STALL_STREAK reaches STALL_MAX and the loop stops.
+streak_ok=1
+for _ in 1 2 3; do
+  [ "$(stall_decision 0 0 1 0 1)" = "increment" ] || streak_ok=0
+done
+if [ "$streak_ok" -eq 1 ]; then pass "3 consecutive red gates -> 3x increment (streak trips STALL_MAX)"; else fail "3 consecutive red gates -> 3x increment"; fi
 
 # --- cascade_unit_id + done_instruction: the /goal completion contract (partition vs standalone) --
 # The ONLY mechanical check on the run.sh contract change — a real claude worker can't run in the

@@ -147,8 +147,8 @@ notify() {
 }
 
 # Run ./gate.sh and tee its output to a persistent log under .cascade/logs/ (gitignored, so it
-# survives the gate-fail `git checkout`/`git clean` below — the failure reason was previously lost
-# to terminal scrollback only). Sets $GATE_LOG; returns the gate's REAL exit code, not tee's.
+# survives the gate-fail `git reset --hard`/`git clean` below — the failure reason was previously
+# lost to terminal scrollback only). Sets $GATE_LOG; returns the gate's REAL exit code, not tee's.
 run_gate_logged() {
   mkdir -p .cascade/logs
   GATE_LOG=".cascade/logs/gate-$(date +%Y%m%d-%H%M%S)-$$.log"
@@ -162,7 +162,7 @@ run_gate_logged() {
 
 # Plan 2 — route the previous gate failure's tail into the next attempt's prompt.
 # Gate logs (.cascade/logs/gate-*.log, written by run_gate_logged above) are gitignored, so they
-# survive the gate-fail revert (`git checkout` + `git clean --exclude=NOTES.md`). On a failure the
+# survive the gate-fail revert (`git reset --hard` + `git clean --exclude=NOTES.md`). On a failure the
 # worktree is reverted and the SAME task is re-picked cold next iteration; without this the next
 # worker rediscovers the identical failure from scratch (wasted quota). These read from DISK, not a
 # loop variable, because cascade runs one worker per process — a variable wouldn't survive.
@@ -280,13 +280,20 @@ done_instruction() {
 }
 
 # Pure stall-streak decision (echoes `reset` or `increment`) for one iteration's outcome.
-# Args: committed backlog_touched notes_changed project_mode  (each 0/1).
+# Args: committed backlog_touched notes_changed project_mode gate_failed  (each 0/1;
+# gate_failed defaults to 0 for older callers).
 # A committed AGENCY iteration that did NOT touch backlog.md is the half-done signature the
 # gate can't see -> `increment`, and it DOMINATES a NOTES.md change (a half-done run still
 # appends a learnings/lesson line, which must not mask the missing task close). External-project
 # mode has no agency backlog to move, so any committed client iteration counts as progress.
+# gate_failed=1 forces `increment`: the harness's OWN gate-failure lesson append flips
+# notes_changed every red iteration, which previously reset the streak — an LLM regenerating a
+# different failing change each attempt evaded STALL_MAX (and LoopGuard) indefinitely.
 stall_decision() {
-  local committed="$1" backlog_touched="$2" notes_changed="$3" project_mode="$4"
+  local committed="$1" backlog_touched="$2" notes_changed="$3" project_mode="$4" gate_failed="${5:-0}"
+  if [ "$gate_failed" -eq 1 ]; then
+    echo increment; return 0
+  fi
   if [ "$committed" -eq 1 ] && [ "$project_mode" -eq 0 ] && [ "$backlog_touched" -eq 0 ]; then
     echo increment; return 0
   fi
@@ -321,20 +328,28 @@ next_decision_id() {
 # Non-blocking escalation: append a decision the director can answer later, then stop.
 escalate() {
   local title="$1" body="$2" id today apply
-  id="$(next_decision_id)"
   today="$(date +%F)"
   apply="$(date -d '+3 days' +%F 2>/dev/null || date +%F)"
   mkdir -p director
-  {
-    printf '\n## %s — %s\n' "$id" "$title"
-    printf '**Asked:** %s · **Default applies:** %s → default = pause this task, keep loop alive\n' \
-      "$today" "$apply"
-    printf '**Trigger:** %s\n' "$body"
-    printf '**Question:** How should the director resolve this stuck loop?\n'
-    printf '**Options:** (a) investigate & fix the loop/guard · (b) rewrite or split the task · (c) drop the task\n'
-    printf '**Recommended default:** (a) — a repeating or stalled loop usually means the task is underspecified, blocked, or the gate is unsatisfiable.\n'
-    printf '**Answer:**\n'
-  } >> director/DECISIONS.md
+  # id-mint + append under an flock (cf. local/queue.sh with_lock): concurrent escalations
+  # (this loop + parallel cascade dispatchers) must not mint the same D-NNN. The subshell
+  # prints the minted id so the caller can log it.
+  id="$(
+    ( flock -x 9
+      new_id="$(next_decision_id)"
+      {
+        printf '\n## %s — %s\n' "$new_id" "$title"
+        printf '**Asked:** %s · **Default applies:** %s → default = pause this task, keep loop alive\n' \
+          "$today" "$apply"
+        printf '**Trigger:** %s\n' "$body"
+        printf '**Question:** How should the director resolve this stuck loop?\n'
+        printf '**Options:** (a) investigate & fix the loop/guard · (b) rewrite or split the task · (c) drop the task\n'
+        printf '**Recommended default:** (a) — a repeating or stalled loop usually means the task is underspecified, blocked, or the gate is unsatisfiable.\n'
+        printf '**Answer:**\n'
+      } >> director/DECISIONS.md
+      printf '%s' "$new_id"
+    ) 9>director/DECISIONS.md.lock
+  )"
   pg_node 'decision' "$id" '{}' >/dev/null 2>&1 || true
   echo "[loop] escalated $id — $title"
   notify "agency loop: ESCALATED $id — $title"
@@ -490,6 +505,7 @@ or stop after ${GOAL_MAX_TURNS} turns"
   # --- gate -> revert, or commit ------------------------------------------
   committed=0
   backlog_touched=0
+  gate_failed=0
   if [ -n "${PROJECT_DIR:-}" ]; then
     # External-project mode: the project's OWN gate + a sanitized commit on an isolated branch are
     # done by enforce.sh (which also records the client commit in the agency ledger). The agency
@@ -516,12 +532,41 @@ or stop after ${GOAL_MAX_TURNS} turns"
     fi
     if [ -x local/digest.sh ]; then local/digest.sh || true; fi
     notify "agency loop: run $run done (external-project) — $TASK"
-  elif [ -x ./gate.sh ] && ! run_gate_logged; then
-    echo "[loop] gate FAILED (log: $GATE_LOG) — reverting working tree, logging lesson."
-    git checkout -- . 2>/dev/null || true
+  elif [ ! -x ./gate.sh ] || ! git diff --quiet HEAD -- gate.sh; then
+    # Fail CLOSED (audit fix 1.1): a missing/renamed/un-chmodded gate.sh previously made the
+    # `[ -x ./gate.sh ] && ! run_gate_logged` elif false, falling through to the COMMIT branch —
+    # a worker deleting the gate landed ungated work on the base. Treat it exactly like a gate
+    # failure: revert (which also restores a tracked gate.sh), log the lesson, never commit.
+    # The diff check extends this to TAMPERING: any worker edit to gate.sh (the merge authority)
+    # is an automatic FAIL — a modified gate's verdict is worthless.
+    # ponytail: tests/ stays worker-editable (softening an existing test still passes) — run
+    # tests from HEAD too if that attack ever shows up in a transcript.
+    echo "[loop] gate.sh missing, non-executable, or modified vs HEAD — treating as gate FAIL; reverting working tree."
+    gate_failed=1
+    # reset --hard restores from HEAD, not the index — a worker's `git add`/`git rm` must not
+    # survive the revert staged (audit fix 2.3; `git checkout -- .` restored from the INDEX).
+    git reset -q --hard HEAD 2>/dev/null || true
     git clean -fd --exclude=NOTES.md 2>/dev/null || true
-    # Append the lesson AFTER the revert so it survives (the old order let `git checkout -- .`
-    # revert the lesson too). The gate output itself lives in $GATE_LOG (gitignored, untouched).
+    {
+      echo ""
+      echo "## $(date -Iseconds) — gate missing/non-exec/modified on: $TASK"
+      echo "gate.sh was absent, lost its executable bit, or was edited; the iteration was reverted UNGATED."
+      echo "The revert restores the HEAD gate.sh. Investigate before retrying this task."
+    } >> NOTES.md
+    pg_append_event "$_pg_stream" "gate.failed" "{}"
+    if [ -n "${CASCADE_PG_JOB_ID:-}" ]; then
+      pg_fail_job "${CASCADE_PG_JOB_ID}" "${CASCADE_PG_CLAIMER:-}" "gate missing/non-exec"
+    fi
+    notify "agency loop: gate MISSING/non-exec/modified on '$TASK' (run $run)"
+  elif ! run_gate_logged; then
+    echo "[loop] gate FAILED (log: $GATE_LOG) — reverting working tree, logging lesson."
+    gate_failed=1
+    # reset --hard restores from HEAD, not the index — a worker's `git add`/`git rm` must not
+    # survive the revert staged (audit fix 2.3; `git checkout -- .` restored from the INDEX).
+    git reset -q --hard HEAD 2>/dev/null || true
+    git clean -fd --exclude=NOTES.md 2>/dev/null || true
+    # Append the lesson AFTER the revert so it survives (the old order let the revert wipe
+    # the lesson too). The gate output itself lives in $GATE_LOG (gitignored, untouched).
     {
       echo ""
       echo "## $(date -Iseconds) — gate failure on: $TASK"
@@ -609,7 +654,7 @@ or stop after ${GOAL_MAX_TURNS} turns"
     notify "agency loop: run $run committed but closed NO backlog task — '$TASK'"
   fi
 
-  case "$(stall_decision "$committed" "$backlog_touched" "$notes_changed" "$proj_mode")" in
+  case "$(stall_decision "$committed" "$backlog_touched" "$notes_changed" "$proj_mode" "$gate_failed")" in
     increment) STALL_STREAK=$((STALL_STREAK + 1)) ;;
     *)         STALL_STREAK=0 ;;
   esac
