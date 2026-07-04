@@ -90,8 +90,12 @@
 #                           MUST be writable in-sandbox; /tmp is read-only there).
 #   AGENCY_OAUTH_TOKEN_FILE online/mixed token file, read OUTSIDE the repo (default
 #                           ~/.config/agency/oauth-token). CLAUDE_CODE_OAUTH_TOKEN env overrides.
+#   AGENCY_HOST_CREDENTIALS director-login credentials file, the D-018 token fallback (default
+#                           ~/.claude/.credentials.json; readable unsandboxed only).
+#   CASCADE_LOG_DIR         worker run-log dir (default <repo>/.cascade/logs, gitignored).
 #
-# Exit: 0 ok · 1 nothing ready / usage · 2 decompose failed (escalated) · 3 at concurrency cap.
+# Exit: 0 ok · 1 nothing ready / usage · 2 decompose failed (escalated) or dispatch profile
+#       unusable / no token · 3 at concurrency cap.
 
 set -euo pipefail
 
@@ -197,7 +201,7 @@ next_ready() {
   return 1
 }
 
-# --- non-blocking escalation (ARCHITECTURE principle 1) --------------------------------------
+# --- non-blocking escalation (VISION: queue a decision, pick the default, continue) ----------
 next_decision_id() {
   local n
   n="$(grep -hoE '^## D-[0-9]+' director/DECISIONS.md 2>/dev/null \
@@ -206,7 +210,7 @@ next_decision_id() {
 }
 
 # escalate <title> <body> [question] [options] [recommended] [default-note]
-# Append a non-blocking director decision (ARCHITECTURE principle 1). The optional 3rd–6th args let
+# Append a non-blocking director decision (VISION: never block on a human). The optional 3rd–6th args let
 # a caller supply its own question/options/recommended/default-note; omitted, they default to the
 # decompose-failure wording (the original, sole caller) so its output is byte-for-byte unchanged.
 escalate() {

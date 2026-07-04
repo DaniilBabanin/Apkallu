@@ -11,7 +11,9 @@ Take the action that is **asked-for, verifiable, and reversible** — in that or
    instruction. No speculative scope, no unrequested features or docs.
 2. **Verifiable** — "done" means `./gate.sh` ends in `RESULT: PASS`. If you can't prove it, it isn't done.
 3. **Reversible** — prefer the change you can undo. Irreversible or credentialed actions (deploy,
-   delete, money, secrets) never run on a worker; escalate with a default of NO.
+   delete, money, secrets) are never taken by a worker: queue a decision and leave the action
+   undone until the director answers. (Enforced by worker policy/prompts and review — there is no
+   autonomous code path that performs such actions.)
 
 ## What this instance will NOT do
 - Invent work the director didn't ask for.

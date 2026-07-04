@@ -18,9 +18,11 @@ fill with whatever you run.
 This is the cleanest split, and it determines the lane before model choice does.
 
 - **Executes code** (agentic work: drives tools, runs tests, runs commands, touches untrusted or
-  experimental code) → **always the VM lane.** The model is just a parameter to the sandbox. The VM
-  is what makes execution safe: real tests run inside it (so a model that *claims* it ran something is
-  caught), and code runs in an isolated guest, not on the host.
+  experimental code) → **always sandboxed.** The model is just a parameter to the sandbox. Today
+  that means the loop worker runs under bubblewrap (fail-closed network) on an isolated worktree;
+  the VM lane (`evals/agentic/`) is the stronger boundary and the target for untrusted-code work,
+  but currently runs standalone eval sessions only — the loop does not dispatch to it yet. Either
+  way the harness runs the real tests (so a model that *claims* it ran something is caught).
 - **Pure generation** (embeddings, classify/route, summarize, docs, commit messages, JSON/structured
   output, explain) → **direct**, to the cheapest warm model that clears the bar. Do **not** route this
   through the VM: no code executes, so the VM adds only boot latency and no safety. Output-side risk is
@@ -30,8 +32,10 @@ This is the cleanest split, and it determines the lane before model choice does.
 
 ## The three lanes (the *where*)
 
-- **Local lane** — open models you run on your own hardware via a local OpenAI-compatible server
-  (e.g. llama.cpp, vLLM, or Ollama). Free, private, fast for small models.
+- **Local lane** — open models you run on your own hardware via a local OpenAI-compatible server.
+  The shipped loader and queue (`local/llm.sh`, `local/queue.sh`) drive LM Studio's `lms` CLI
+  specifically; only the VM lane's proxy is provider-agnostic (any OpenAI-compatible base URL).
+  Free, private, fast for small models.
   Treat local models as having **zero injection-safety** and as prone to **fabricating execution when
   unsupervised** (claiming a test passed without running it). So a local model is safe only when used
   (a) on **trusted input** for cheap, general, high-volume generation, or (b) **as the model inside the
@@ -42,16 +46,17 @@ This is the cleanest split, and it determines the lane before model choice does.
   many concurrent sessions that a single local box can't serialize. Like local models, treat it as
   injection-unsafe; it earns trust only behind the sandbox and the gate.
 
-- **VM lane** — an isolated guest (e.g. a microVM with the agent SDK and a container runtime inside)
-  where a model can execute code without touching the host. This is a **sandbox (the *where*)**,
-  orthogonal to the **model (the *who*)**: the VM can host a local coder OR a remote open model. Use it
-  whenever a model must run untrusted or experimental code. The VM is the security boundary — secrets
-  stay off the VM.
+- **VM lane** — an isolated guest (shipped: a qemu/libvirt VM with OpenHands and docker inside,
+  `evals/agentic/`) where a model can execute code without touching the host. This is a **sandbox
+  (the *where*)**, orthogonal to the **model (the *who*)**: the VM can host a local coder OR a
+  remote open model. The VM is the security boundary — secrets stay off the VM (host-side key
+  proxy). Today it runs standalone eval sessions; wiring it into the loop is planned, not done.
 
 - **Frontier lane** — your strongest model (typically a paid frontier API). It is the quality ceiling
-  for planning and orchestration, and it is the **gater** that reviews any lane's output before anything
-  irreversible happens. Not sandboxed by default, so it is not where you run untrusted code; it is where
-  you reason about it.
+  for planning and orchestration, and it reviews what the mechanical gate can't check. Note the merge
+  authority itself is deliberately **non-LLM**: git facts + `./gate.sh` decide what lands
+  (ARCHITECTURE principle 2). Not sandboxed by default, so it is not where you run untrusted code; it
+  is where you reason about it.
 
 ---
 
@@ -66,16 +71,20 @@ This is the cleanest split, and it determines the lane before model choice does.
 | Coding, fully-specified, testable, **sandbox needed** | VM · a **local coder** first (free) → escalate to VM · a remote open model if it fails | sandbox catches fabrication; try free before paid |
 | Hard / long-horizon real-world coding | VM · a strong open coder you configure (remote) | best available, sandboxed; escalate the ones that matter |
 | Hard / novel / ambiguous / high-stakes; planning; orchestration | **frontier** | quality ceiling and reasoning |
-| Review / gate of any lane's output; secrets / irreversible actions | **frontier** (or a human) | worker output is untrusted; safety is the harness + gate, never the worker |
+| Review / gate of any lane's output; secrets / irreversible actions | mechanical gate (`./gate.sh`); **frontier** (or a human) for what the gate can't check | worker output is untrusted; safety is the harness + gate, never the worker |
 
 **Escalation ladder:**
 `local (trusted/cheap) → VM + local coder (free sandbox) → VM + remote open model (paid sandbox) → frontier`
 
 Rules that never bend:
-- Never run untrusted code outside the VM.
-- Never put secrets in a local or open-model worker's context. Workers get no payment credentials and
-  no cloud tokens — those live only in the orchestrator's dispatch environment.
-- Irreversible actions (deploy / delete / credentials / money) always pass the gate.
+- Never run untrusted code unsandboxed (bubblewrap for loop workers today; the VM lane for eval
+  sessions and, once wired in, untrusted-code work).
+- Never put secrets in a local or open-model worker's context. Workers get no payment credentials.
+  A cloud worker carries exactly one cloud secret: its own inference token
+  (`CLAUDE_CODE_OAUTH_TOKEN`, injected per D-018 — scrubbed from sandboxed bash subprocesses and
+  stripped from the environment before the gate runs).
+- Irreversible actions (deploy / delete / credentials / money) are never taken by a worker — they
+  queue a decision and stay undone until the director answers.
 
 ---
 
@@ -137,9 +146,11 @@ Net effect: most tasks hit a warm model, and the expensive slot changes only whe
 
 A recap of what the lanes and rules above already establish, in one place: every worker model is
 assumed prompt-injectable, so safety lives in the harness, the sandbox, and the gate, never in the
-model. The VM is the boundary (untrusted or experimental code runs only inside it, secrets stay off
-it). No worker gets cloud tokens or payment credentials. Worker output is untrusted until the gater
-(frontier model or human) reviews it, and irreversible actions always stop at the gate.
+model. The sandbox is the boundary (bubblewrap for loop workers, the VM lane for eval sessions;
+secrets stay off the VM). No worker gets payment credentials; a cloud worker carries only its own
+inference token. Worker output is untrusted until the mechanical gate (`./gate.sh`) passes it —
+frontier or human review covers what the gate can't check — and irreversible actions queue a
+decision instead of happening.
 
 ---
 

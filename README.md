@@ -1,32 +1,36 @@
 # Apkallu
 
 A self-hosted autonomous dev agency. Give it an instruction; a loop turns it into committed work.
-Implementation runs inside disposable microVMs, fanned out in parallel, while the orchestrator decides
-and verifies.
+Loop workers run sandboxed (bubblewrap, isolated git worktrees), fanned out in parallel, while the
+orchestrator decides and verifies; a disposable-VM lane (`evals/agentic/`) runs isolated coding
+sessions for external work.
 
 The idea: run agents unattended and sandboxed, with no human at a terminal. The loop handles
-concurrency and coordinates through git refs, not LLM-judged gates. The microVM is the security
-boundary, and an agent's output is reviewed before it ships.
+concurrency and coordinates through git refs (plus a Postgres job queue when it's up), not
+LLM-judged gates. The sandbox is the security boundary, and an agent's output is gated before it
+ships.
 
 Clone it onto any Linux box with hardware virtualization.
 
 ## What it builds on, and what's new
 
 Apkallu is glue, not a new agent or model. Inside the VM the implementation agent is OpenHands; the
-loop's inner worker is Claude Code; isolation is KVM/libvirt microVMs plus bubblewrap; inference is any
+loop's inner worker is Claude Code; isolation is KVM/libvirt VMs plus bubblewrap; inference is any
 OpenAI-compatible endpoint. None of those are ours.
 
 The new part is combining them to run unattended and headless:
 
-- the microVM as the security boundary, so untrusted execution never touches the host;
-- git-ref coordination via committed claim markers (GUPP): a worker claims a unit by committing a
-  marker, so a second dispatcher reads it and skips. Lease-free, no lock server. Merge authority is a
-  deterministic gate (`./gate.sh` → `RESULT: PASS`) that commits on green with no human in the loop;
-- a non-blocking decisions queue: reversible calls take a default and proceed, irreversible ones queue
-  with a default of NO.
+- sandboxed execution as the security boundary: loop workers under bubblewrap on isolated
+  worktrees; the VM lane for isolated coding sessions on external repos;
+- git-ref coordination (GUPP): dispatch claims a unit atomically via the Postgres job queue when
+  it's up, else by committing a claim marker a second dispatcher reads and skips. Lease-based in
+  PG, lock-server-free in git. Merge authority is a deterministic gate (`./gate.sh` →
+  `RESULT: PASS`); the harness commits on green with no human in the loop;
+- a non-blocking decisions queue: reversible calls take a default and proceed; irreversible ones
+  queue a decision and stay undone until the director answers, pausing only that task.
 
 Closest prior art is the Ralph loop and ComposioHQ's agent-orchestrator; Apkallu differs by combining
-microVM isolation (over containers), committed-ref claiming (over a watched dashboard), and the gate
+VM isolation (over containers), committed-ref claiming (over a watched dashboard), and the gate
 as merge authority.
 
 It is not a coding agent or model, a hosted service, a multi-agent chat framework, or a general
@@ -39,10 +43,11 @@ it at and your backlog, so measure that on your own setup.
 ## What's here
 - `loop/`: iteration loop (`run.sh`), cascade orchestrator (`cascade.sh`), scheduler
   (`scheduler.sh`), commit enforcement.
-- `evals/agentic/`: the microVM lane. `vm.py` (lifecycle), `dispatch.py` (RAM-bounded parallel fanout),
+- `evals/agentic/`: the VM lane. `vm.py` (lifecycle), `dispatch.py` (RAM-bounded parallel fanout),
   `run_session.py` (one session), `proxy.py` (keeps the inference key off the VM), `egress_proxy.py`
   (domain allowlist).
-- `local/`: ops. Watcher, status, job queue, local-LLM loader, sandbox setup.
+- `local/`: ops. Watcher, job queue, local-LLM loader, sandbox setup, decision/digest/lineage/map
+  tooling. (Status lives at the repo root: `status.sh`.)
 - `lib/` + `db/`: optional Postgres control plane (jobs + events).
 - `policy/`: routing, delegation, substrate guidance.
 - `tests/`: shell test suites.

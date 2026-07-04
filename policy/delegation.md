@@ -1,9 +1,11 @@
 # Delegation Policy — who does the work
 
 Apkallu has three places work can run: the **orchestrator** (a frontier model that plans, decides,
-and verifies), **sandboxed VM sessions** (a long-horizon agent that implements on a throwaway copy of
-the repo), and **local models** (served from a local OpenAI-compatible server — unmetered, but weaker
-and limited by your hardware). This file is the rule for picking among them.
+and verifies), **sandboxed worker sessions** (today: the loop's worker under bubblewrap on an
+isolated git worktree; a throwaway-VM lane in `evals/agentic/` is the target for untrusted-code
+work but is not yet wired into the loop), and **local models** (served locally via LM Studio's
+`lms` tooling — unmetered, but weaker and limited by your hardware). This file is the rule for
+picking among them.
 
 ## Core principle
 
@@ -12,9 +14,10 @@ low-stakes work.**
 
 - The orchestrator owns the judgment calls: what to build, how to decompose it, which lane to route to,
   and — the part that never delegates — whether a result is actually correct and merge-worthy.
-- Real implementation work (writing code against a real task) is handed to a **sandboxed VM session**:
-  launch it, let it develop on an isolated checkout, then review the patch it returns. The orchestrator
-  orchestrates and verifies; the VM develops.
+- Real implementation work (writing code against a real task) is handed to a **sandboxed worker
+  session**: launch it, let it develop on an isolated checkout (a git worktree today; a throwaway VM
+  once that lane is wired in), then gate the result it returns. The orchestrator orchestrates and
+  verifies; the worker develops.
 - Local models are free, so when a task is genuinely low-stakes, prefer local.
 
 ### What the orchestrator keeps for itself
@@ -23,8 +26,9 @@ Anything a sandbox VM **cannot** do stays with the orchestrator:
 
 - Reproduction, diagnosis, and verification that need a **real browser or device** — a VM can't drive
   one.
-- The final review / merge decision. This is a trust boundary: a worker's output is untrusted until the
-  orchestrator (or a gate) has checked it.
+- The final review / merge decision. This is a trust boundary: a worker's output is untrusted until
+  checked. Note the shipped merge authority is deliberately mechanical — git facts + `./gate.sh`, no
+  LLM (ARCHITECTURE principle 2); the orchestrator's review covers what the gate can't reach.
 - Planning, decomposition, and architecture — these need the strongest reasoning available.
 
 A fix isn't done because it applied or type-checked. It's done when it works **and** broke nothing else,
@@ -52,7 +56,7 @@ produced it.
 | Work | Goes to | Why |
 |---|---|---|
 | Planning, decomposition, architecture | orchestrator | needs frontier reasoning |
-| Code on real tasks | sandboxed VM session | isolated checkout; orchestrator reviews the returned patch |
+| Code on real tasks | sandboxed worker session (worktree today; VM lane when wired in) | isolated checkout; the gate checks the returned work |
 | Reproduction / verification needing a real browser or device | orchestrator | a VM can't drive one |
 | Final review / merge judgment | orchestrator | trust boundary |
 | Log / diff / trace summarization | local (general) | high volume, low stakes |

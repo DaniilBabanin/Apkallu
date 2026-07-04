@@ -5,7 +5,9 @@
 # and any OPEN director decisions), asks the local `general` model (via
 # local/llm.sh) to distill it into a short markdown digest, and writes that to
 # director/REPORT.md. If NTFY_TOPIC is set, also pushes the digest to ntfy.
-# (ARCHITECTURE.md a build phase: "commit -> REPORT.md digest -> ntfy push".)
+# Side effects beyond REPORT.md: refreshes director/STATE.md's binding block
+# (local/state-sync.sh) and regenerates director/MAP.md (local/map-gen.sh) —
+# both best-effort, never fail the digest.
 #
 # Meant to be invoked by loop/run.sh after a committed iteration, but is safe to
 # run by hand at any time. It never hard-fails the caller: on any missing tool

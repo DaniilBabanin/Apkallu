@@ -138,7 +138,8 @@ cmd_project_commit() {
   echo "[enforce] project-commit: committed $sha on $branch (project gate green)."
 
   # Agency-side bookkeeping: record the client commit in the agency ledger (the mechanical signal
-  # for the digest split + the 14-day kill switch). The project repo itself stays agency-agnostic.
+  # for the digest split; the 14-day kill switch that also read it was removed 2026-06-12, see
+  # header). The project repo itself stays agency-agnostic.
   cmd_record "$(basename "$dir")" "$branch" "$sha" "$(printf '%s' "$clean" | head -n1)"
 }
 

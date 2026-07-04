@@ -2,6 +2,8 @@
 # GPU worker pool — a local server (OpenAI-compatible) role router. v2 (2026-06-07).
 # Usage: ./local/llm.sh <role> "prompt"   (or pipe prompt on stdin)
 #        ./local/llm.sh warmup            (load the always-warm lane)
+#        ./local/llm.sh ensure <model> <ctx> [ttl]  (load + ctx-pin + probe one model —
+#                                          used by loop/run.sh LOCAL=1 and local/queue.sh)
 # Roles: triage | general | coder | structured | heavy | embed
 #
 # Role map from the 2026-06-07 golden suite (policy/routing.md, evals/results/):
@@ -16,8 +18,9 @@
 # LOCAL=1 model @65536 — that path needs ~23k+ ctx for the Claude Code system prompt.
 #
 # Lanes (routing.md §4): warm lane (embed+nemotron+e4b, ~10GB VRAM, never evicted) vs ONE
-# big-MoE slot (coder/structured/heavy/general-model — loading one evicts the others, never the
-# warm lane). MoE spilling to RAM is fine; only load time hurts → fewest swaps wins.
+# big-MoE slot (the coder/structured/heavy/general/codegen big models — loading one evicts the
+# others, never the warm lane). MoE spilling to RAM is fine; only load time hurts → fewest swaps
+# wins.
 #
 # ensure_loaded guards the two live-caught serving traps (policy/delegation.md 2026-06-07):
 # KV-OOM load failure silently JIT-falls-back to a 4096-ctx instance under the same id, and

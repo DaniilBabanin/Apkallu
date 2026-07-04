@@ -22,7 +22,7 @@
 # `local/llm.sh ensure` (ctx-pin + functional probe + lane-aware eviction).
 #
 # Usage:
-#   ./local/queue.sh enqueue <class> [--prompt "…" | --cmd "…"] [--prio N] [--models "a,b"] [--ctx N]
+#   ./local/queue.sh enqueue <class> [--prompt "…" | --cmd "…"] [--prio N] [--models "a,b"] [--ctx N] [--id <id>]
 #   ./local/queue.sh submit <class> [enqueue-opts]  # enqueue + run NOW, print output (transient)
 #   ./local/queue.sh next                 # print id+model chosen by policy (also requeues
 #                                         # running tasks whose owner died / lease expired)
@@ -40,6 +40,7 @@
 #
 # Env:
 #   QUEUE_FILE        queue path (default local/queue.ndjson)
+#   QUEUE_OUT_DIR     per-task output dir (default local/queue-out)
 #   QUEUE_PS_JSON     test seam: JSON for loaded-model state instead of `lms ps --json`
 #   QUEUE_RUN_CMD     test seam: command run instead of the real chat call; gets
 #                     QUEUE_MODEL/QUEUE_CTX/QUEUE_PROMPT env (cascade.sh DECOMPOSE_CMD pattern)

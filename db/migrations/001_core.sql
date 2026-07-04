@@ -1,5 +1,4 @@
 -- 001_core.sql — Phase 0 control-plane core: job queue + append-only event log.
--- Design: docs/analysis/implementation-plan.md (Step 1), research-2026-06-12.md §2.
 --   * jobs:   pgmq-style visibility-timeout lease (visible_at) — an expired claim simply
 --             becomes claimable again; no janitor daemon (reap_expired is called
 --             opportunistically by dispatchers).

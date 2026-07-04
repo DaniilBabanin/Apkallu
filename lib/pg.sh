@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # lib/pg.sh — psql wrapper for the agency loop control plane.
 # Source this file to get: PG_AVAIL (0/1), pg_query, pg_append_event,
-# pg_claim_next_job, pg_insert_job, pg_complete_job, pg_fail_job.
+# pg_claim_next_job, pg_insert_job, pg_complete_job, pg_fail_job,
+# pg_node, pg_edge (lineage upserts).
 # All functions degrade to no-ops / rc 1 when PG is unavailable.
 #
 # Values reach SQL only through psql -v variables (:'var' quoting, SQL fed via

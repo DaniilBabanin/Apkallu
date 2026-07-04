@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # sandbox-setup.sh — configure Claude Code's native Linux sandbox for the unattended loop.
-# Closes the ARCHITECTURE.md "Planned hardening" gap; pending director approval = D-005.
+# The default posture since D-005 (2026-06-06): sandboxed acceptEdits, fail-closed.
 #
 # What it configures (project .claude/settings.json — applies to every claude run in this
 # repo, including loop/run.sh's inner `claude -p`):
@@ -90,7 +90,8 @@ apparmor_warn() {
   #    kernel.apparmor_restrict_unprivileged_userns=1, BUT capability-restricts the ns, so
   # 2. NESTED userns (what Claude Code's seccomp setup actually needs) still fails with
   #    "apply-seccomp: ... nested userns is capability-restricted". The docs' fix is a scoped
-  #    unconfined AppArmor profile for /usr/bin/bwrap (shipped at local/apparmor-bwrap.profile).
+  #    unconfined AppArmor profile for /usr/bin/bwrap (write one per the Claude Code
+  #    sandboxing docs — not shipped in this repo).
   if ! bwrap --ro-bind / / --dev /dev --proc /proc true 2>/dev/null; then
     echo "[sandbox] ⚠ bwrap cannot create a user namespace — sandbox WILL fail closed."
   elif ! bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all \
@@ -100,8 +101,9 @@ apparmor_warn() {
   else
     return 0
   fi
-  echo "[sandbox]   sudo install -m644 local/apparmor-bwrap.profile /etc/apparmor.d/bwrap \\"
-  echo "[sandbox]     && sudo systemctl reload apparmor"
+  echo "[sandbox]   write a scoped unconfined AppArmor profile for /usr/bin/bwrap (see the"
+  echo "[sandbox]   Claude Code sandboxing docs), then:"
+  echo "[sandbox]   sudo install -m644 <profile> /etc/apparmor.d/bwrap && sudo systemctl reload apparmor"
 }
 
 settings_ok() {

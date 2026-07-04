@@ -52,7 +52,7 @@ Axis = **does the task execute code?**
 done-condition) → `gate.sh` → commit → `local/digest.sh` → `director/REPORT.md`. `loop/cascade.sh`
 turns a director instruction into committed units, each worked in its own worktree, then `merge`s the
 gate-green ones back into main (the up-cascade). Execution lanes:
-**orchestrator** (you) · **vm** (`evals/agentic/`, a KVM/libvirt microVM sandbox) · **local model**
+**orchestrator** (you) · **vm** (`evals/agentic/`, a KVM/libvirt VM sandbox) · **local model**
 (`local/llm.sh`, a local OpenAI-compatible server).
 
 ## Inference is provider-agnostic (configured in `.env`)
@@ -75,7 +75,7 @@ server instead.
 - Run the loop: `./loop/scheduler.sh` (supervises) · burst: `MAX_RUNS=3 ./loop/run.sh` · zero-quota
   (local only): `LOCAL=1 ...`
 - Decompose + dispatch + merge: `./loop/cascade.sh decompose "<instruction>"` ·
-  `./loop/cascade.sh dispatch [--profile local|online]` · `./loop/cascade.sh merge` (up-cascade: land
+  `./loop/cascade.sh dispatch [--profile local|online|mixed]` · `./loop/cascade.sh merge` (up-cascade: land
   gate-green branches into main, render the backlog)
 - Gate: `./gate.sh` (must end `RESULT: PASS`) · Status: `./status.sh` · Cockpit: `./tui.sh`
 - Answer a decision: `./local/decide.sh apply <id> yes|no|always|<text> [note]` · list open:
@@ -114,13 +114,16 @@ Trust this; do **not** re-grep `vm.py`/`run_session.py`/`proxy.py` to "check" th
 
 ## GUPP — coordinate through git, not an LLM's judgment
 
-The cascade's coordination state lives in **git refs**, never in a model's opinion of "is this ready
-/ claimed / done." Every such decision reads git-tracked state:
+The cascade's coordination state lives in **git refs** (plus the Postgres job queue when it's up),
+never in a model's opinion of "is this ready / claimed / done." Every such decision reads tracked
+state:
 
 - **decompose** writes the unit blocks and commits them.
-- **dispatch** picks the next ready unit and **commits a claim marker before launching the worker**,
-  so a second concurrent dispatcher reads that committed marker and skips the unit — no mailbox, no
-  lock server, no LLM arbitration.
+- **dispatch** picks the next ready unit and **claims it before launching the worker** — when
+  Postgres is up, `claim_next_job()` claims atomically and the job row IS the claim (no git
+  marker); when PG is down or has no matching job, it **commits a claim marker** so a second
+  concurrent dispatcher reads that committed marker and skips the unit — no mailbox, no lock
+  server, no LLM arbitration.
 - a **worker** owns exactly one unit on an isolated branch until its `gate.sh` passes; it records
   completion by writing its OWN per-unit marker `done/<id>.md` (never the shared `backlog.md`), so
   branches stay disjoint — the same per-unit-file partitioning as claims, extended to status.

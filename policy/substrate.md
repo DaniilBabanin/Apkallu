@@ -12,10 +12,14 @@ reasoning, not for authority — every consequential action it proposes is media
   results. Concurrency is a property of how the orchestrator schedules work, not a feature of any one
   agent runtime. There is a bounded ceiling on how many units run at once.
 
-- **Work runs inside the microVM sandbox.** Real implementation happens in a throwaway VM on an
-  isolated copy of the repo, never on the host. The VM is the security boundary: whatever an agent does
-  inside it — run code, install packages, touch the filesystem — cannot reach the host. The host is
-  never at risk during execution. When the VM is discarded, so is anything it did.
+- **Work runs inside a sandbox — two tiers today.** The production loop runs its worker on the
+  host under a bubblewrap sandbox (`local/sandbox-setup.sh`: sandboxed bash, fail-closed network
+  allowlist, credential paths shielded), on an isolated git worktree for cascade units. The
+  stronger boundary — a throwaway qemu/libvirt VM with the inference key held host-side
+  (`evals/agentic/`) — exists as a standalone eval lane and is the target substrate for
+  untrusted-code work, but is not yet wired into the loop. When a VM is used, whatever the agent
+  does inside it cannot reach the host, and discarding the VM discards everything it did. Known
+  gap: `./gate.sh` executes worker-authored `tests/` scripts on the host, unsandboxed.
 
 - **Agent output is untrusted until it is reviewed.** A patch coming back from a sandbox is a
   *proposal*, not a merge. It is gated by review (by the orchestrator, or by an automated gate, or
@@ -25,8 +29,10 @@ reasoning, not for authority — every consequential action it proposes is media
 
 - **Irreversible actions stay behind a gate.** Anything that cannot be undone — deploying, deleting,
   spending money, anything credentialed — does not happen autonomously. It becomes a queued decision
-  with a default of NO; only the action itself is held, the rest of the run continues. Reversible
-  choices get a sensible default and proceed; the operator is never a blocker for ordinary work.
+  and is left undone until the director answers (worker policy; no autonomous code path performs such
+  actions). Only the action itself is held: an escalation pauses its task, and the loop and scheduler
+  keep working the rest of the backlog. Reversible choices get a sensible default and proceed; the
+  operator is never a blocker for ordinary work.
 
 ## Why the loop, and not an interactive multi-agent runtime
 
@@ -46,8 +52,8 @@ before it is trusted, the same as any other agent output.
 
 | Boundary | What it protects | How it is enforced |
 |---|---|---|
-| Host ↔ sandbox | The host machine and its credentials | All untrusted execution runs in the microVM; the VM is disposable |
-| Agent output ↔ what ships | The real repo / production | Review or an automated gate before anything merges or deploys |
-| Reversible ↔ irreversible | Anything that can't be undone | Irreversible actions queue a decision (default NO); the run continues |
+| Host ↔ sandbox | The host machine and its credentials | Loop workers: bubblewrap sandbox + isolated worktree; eval sessions: a disposable VM (`evals/agentic/`) |
+| Agent output ↔ what ships | The real repo / production | The automated gate (`./gate.sh`) before anything merges |
+| Reversible ↔ irreversible | Anything that can't be undone | Irreversible actions queue a decision and are left undone; the run continues (paused task, not paused loop) |
 
 The orchestrator owns all three. The agent's job is to be smart inside them.

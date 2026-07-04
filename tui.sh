@@ -9,9 +9,11 @@
 # Keys:  s start scheduler (detached)   x stop scheduler+loop   n dispatch next unit
 #        r reset a stuck unit   a answer a D-NNN   v ssh into a work VM
 #        f follow a work VM's live session events   q quit
-# Every write asks y/N first — a mistap on a tablet must not nuke a live unit.
+# Destructive writes (start/stop/dispatch/reset) ask y/N first — a mistap on a
+# tablet must not nuke a live unit. [a]nswer has no extra y/N: it already
+# requires typing the D-NNN id and a verdict, so no single mistap can fire it.
 #
-# Usage: ./tui.sh
+# Usage: ./tui.sh [-h|--help]
 # Env:   COCKPIT_REFRESH   seconds between auto-refreshes (default 5)
 #        COCKPIT_SCHED_LOG detached-scheduler log file (default loop/scheduler.log)
 set -euo pipefail

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # db/migrate.sh — apply numbered SQL migrations from db/migrations/ in order, once each.
-# (implementation-plan.md ground rules: psql + a schema_migrations table, no framework.)
+# (Ground rules: psql + a schema_migrations table, no framework.)
 #
 # Each migration runs in ONE transaction together with its schema_migrations insert
 # (psql --single-transaction wraps the -f and -c in a single BEGIN/COMMIT), so a failed

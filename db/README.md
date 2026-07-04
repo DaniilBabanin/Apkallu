@@ -1,8 +1,7 @@
 # db/ — the Postgres control plane (Phase 0)
 
 PostgreSQL 18, OS package, localhost-only, one database `agency`.
-Design and rationale: `docs/analysis/implementation-plan.md` (Step 1 DDL, decided options)
-and `docs/analysis/research-2026-06-12.md` §2. Schema lives in `migrations/`, applied by
+Schema lives in `migrations/` (the SQL files carry the design rationale inline), applied by
 `./migrate.sh` (idempotent, one transaction per migration, `schema_migrations` table).
 
 ## Roles & auth
@@ -10,7 +9,7 @@ and `docs/analysis/research-2026-06-12.md` §2. Schema lives in `migrations/`, a
 | Role | Auth | Used by | Can |
 |---|---|---|---|
 | `db` | peer (unix socket) | migrations, admin psql | owns the `agency` DB and its tables |
-| `agency_loop` | scram over TCP 127.0.0.1, password in `~/.pgpass` | all loop/dispatcher glue (`lib/pg.sh`, Step 2) | SELECT/INSERT everywhere; UPDATE only jobs state columns + `events.invalidated_by`; no DELETE |
+| `agency_loop` | scram over TCP 127.0.0.1, password in `~/.pgpass` | all loop/dispatcher glue (`lib/pg.sh`, Step 2) | SELECT/INSERT everywhere; UPDATE only jobs state columns + `events.invalidated_by` + `edges.invalidated_by`; no DELETE |
 
 Append-only on `events` is a permission, not a convention, plus a write-once trigger on
 `invalidated_by`. Tests (Step 4) assert permission-denied. The default Ubuntu hba line
@@ -121,6 +120,7 @@ Generic provenance graph: nodes + edges, with supersession via `invalidated_by`.
 | `label` | text | e.g. `produced_by`, `ran_on`, `used_prompt`, `under_profile`, `on_machine`, `produced` |
 | `attrs` | jsonb | edge payload (category/score/ts on `produced` edges) |
 | `invalidated_by` | bigint FK edges | supersession pointer — set to the newer edge id when a verdict is superseded; NULL = current |
+| `created_at` | timestamptz | insert timestamp |
 | UNIQUE | (from_node, to_node, label) | idempotent add via `ON CONFLICT DO NOTHING` |
 
 Append-only enforcement: `agency_loop` has SELECT + INSERT on both tables; UPDATE is permitted **only** on `edges.invalidated_by` (column-level grant). No DELETE. Supersession never destroys data: older verdicts remain queryable via `bench_verdicts WHERE current = false`.
@@ -139,7 +139,7 @@ Both follow the insert-then-select pattern (not `RETURNING`) because `ON CONFLIC
 | View | What it answers |
 |---|---|
 | `commit_provenance` | For each commit: the job that produced it + model, prompt, sandbox_profile, machine (recursive CTE, depth ≤ 1 commit→job then star-join) |
-| `model_outputs` | All nodes a model version linked to (via any outgoing edge from its job nodes) |
+| `model_outputs` | Per model version: the jobs that ran on it (incoming `ran_on` edges) and the commits those jobs produced (`produced_by`), depth-capped at 5 |
 | `bench_verdicts` | Per-(model, category): score, `current` boolean (false = superseded by a newer import) |
 
 ### CLI queries
@@ -149,6 +149,7 @@ local/lineage.sh commit <sha>      # prefix-matched; prints job/model/prompt/pro
 local/lineage.sh model <id>        # all outputs for a model version
 local/lineage.sh bench             # current verdicts only
 local/lineage.sh bench --all       # current + superseded (shows invalidation history)
+local/lineage.sh greenrate         # attempt green-rate per model/profile (PG down = clean skip)
 ```
 
 ### Import (eval results)

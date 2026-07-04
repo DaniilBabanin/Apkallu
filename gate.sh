@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# gate.sh — the merge gate. "No green, no merge." (ARCHITECTURE.md, principle 4)
+# gate.sh — the merge gate. "No green, no merge." (ARCHITECTURE.md, principle 1)
 #
 # Lints every .sh file in the repo with shellcheck, then runs any executable
 # scripts under tests/. Exits non-zero if any check fails so loop/run.sh rolls

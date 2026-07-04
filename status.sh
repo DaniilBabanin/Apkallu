@@ -5,6 +5,7 @@
 #   RUNNING            scheduler/loop/cascade/worker-claude processes with uptime
 #   VMS                agentic-* KVM work VMs (running, mem, egress), pool overlays, inference proxy
 #   ACTIVE UNITS       current_tasks/*.claim — claimed cascade units, age, dispatcher liveness
+#   QUEUE              PG job-queue counts by state (skipped when PG is down)
 #   NEXT UP            first unclaimed open backlog task + open/done counts
 #   QUESTIONS WAITING  director/DECISIONS.md entries with an empty **Answer:** OR a
 #                      system-picked default the director hasn't confirmed (convention:
