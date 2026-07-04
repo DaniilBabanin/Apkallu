@@ -12,14 +12,17 @@
 #
 # Hardening (loop-hardening iteration, 2026-06-06):
 #   - per-iteration timeout   cap each claude run so one stuck turn can't eat the window
-#                             (ITER_TIMEOUT seconds, default 1800).
-#   - LoopGuard               hash task+worktree-diff each run; abort after N identical
+#                             (ITER_TIMEOUT seconds — defaults in Env below).
+#   - LoopGuard               hash task+worktree-diff each run; trip after N identical
 #                             no-progress iterations (LOOPGUARD_MAX_IDENTICAL, default 2).
 #                             Catches the A-B-A-B / same-failing-change repeat.
-#   - stall detection         abort after N runs with no commit AND no persisted NOTES.md
+#   - stall detection         trip after N runs with no commit AND no persisted NOTES.md
 #                             change (STALL_MAX, default 2). Catches the do-nothing freeze.
-#   Both guards never block the human: they append a numbered entry to
-#   director/DECISIONS.md (with a default + apply-by date) and stop the loop.
+#   A tripped guard never blocks the human OR the rest of the run (substrate: only the action
+#   is held): it appends a numbered entry to director/DECISIONS.md (with a default + apply-by
+#   date), which PAUSES that task — next_task skips any task quoted in an OPEN decision, and
+#   answering the decision (local/decide.sh apply) unpauses it — then the loop moves on to the
+#   next runnable task. A cascade unit stops instead: the dispatcher owns moving on.
 #
 # Usage:
 #   MAX_RUNS=3 ./loop/run.sh
@@ -31,8 +34,10 @@
 #   ITER_TIMEOUT             per-iteration claude timeout, seconds (default 3600 — goal runs
 #                            are multi-turn, the old single-shot 1800 was routinely too short)
 #   GOAL_MAX_TURNS           in-goal turn bound passed to the /goal condition (default 25)
-#   LOOPGUARD_MAX_IDENTICAL  abort after this many identical task+diff runs (default 2)
-#   STALL_MAX                abort after this many no-progress runs (default 2)
+#   LOOPGUARD_MAX_IDENTICAL  pause the task after this many identical task+diff runs (default 2)
+#   STALL_MAX                pause the task after this many no-progress runs (default 2)
+#   GATE_TAIL_LINES          lines of the last failing gate log inlined into the next attempt's
+#                            prompt (default 25)
 #   NTFY_TOPIC               if set, push a one-line status to ntfy.sh/<topic> per iteration
 #   ALLOW_ALL                1 = explicit bypass (--dangerously-skip-permissions; network
 #                            allowlist becomes advisory — supervised use only). DEFAULT is 0
@@ -46,6 +51,8 @@
 #   LOCAL_BASE               Anthropic-compatible base URL (default http://localhost:1234)
 #   LOCAL_MODEL              served model id (default example/general-model; must be loaded with
 #                            ctx >= 32k — Claude Code's system prompt alone is ~23k tokens)
+#   LOCAL_CTX                minimum served context under LOCAL=1 (default 65536) — the run
+#                            aborts early if llm.sh ensure can't serve the model at this ctx
 #   PROJECT_DIR              external-project mode: path to a CLIENT project checkout. When set,
 #                            the iteration works the PROJECT (not the agency repo): the inner
 #                            claude edits there, the project's OWN gate (PROJECT_GATE) decides
@@ -195,6 +202,23 @@ gate_fail_block() {
     "$GATE_TAIL_LINES" "$body"
 }
 
+# Backlog lines quoted (`> - [ ] …`) inside OPEN (blank **Answer:**) entries of
+# director/DECISIONS.md — a tripped guard escalates with the task quoted, so an open escalation
+# PAUSES that task; answering it (local/decide.sh apply) unpauses. Open-detection semantics match
+# local/decide.sh's awk (cf. loop/scheduler.sh have_task, which consumes the same convention).
+paused_tasks() {
+  awk '
+    function flush() { if (id != "" && ans !~ /[^[:space:]]/) printf "%s", buf; id=""; ans=""; inans=0; buf="" }
+    /^## D-[0-9]+ / { flush(); id=$2; next }
+    id == ""             { next }
+    /^---[[:space:]]*$/  { flush(); next }
+    /^\*\*Answer:\*\*/ { inans=1; t=$0; sub(/^\*\*Answer:\*\*/, "", t); ans=ans t; next }
+    inans { ans = ans $0; next }
+    /^> - \[ \] / { l=$0; sub(/^> /, "", l); buf = buf l "\n" }
+    END { flush() }
+  ' director/DECISIONS.md 2>/dev/null || true
+}
+
 next_task() {
   # CASCADE_TASK lets cascade.sh dispatch a SPECIFIC committed unit (a backlog line) to this
   # worker instead of the top-of-file pick — so a worker runs the unit it was claimed for,
@@ -203,7 +227,9 @@ next_task() {
     printf '%s\n' "$CASCADE_TASK"
     return 0
   fi
-  grep -m1 '^- \[ \]' backlog.md || true
+  # First open task that is NOT paused by an open decision (substrate: only the action is held —
+  # a stuck task waits for the director while the loop works the rest of the backlog).
+  grep '^- \[ \]' backlog.md 2>/dev/null | grep -vxF -f <(paused_tasks) | head -n1 || true
 }
 
 # sha256 of stdin (portable: sha256sum -> shasum -> cksum).
@@ -374,8 +400,8 @@ while [ "$run" -lt "$MAX_RUNS" ] && [ "$(date +%s)" -lt "$DEADLINE" ]; do
 
   TASK="$(next_task)"
   if [ -z "$TASK" ]; then
-    echo "[loop] backlog empty — stopping."
-    notify "agency loop: backlog empty after $((run - 1)) runs"
+    echo "[loop] no runnable task (backlog empty or all open tasks paused) — stopping."
+    notify "agency loop: no runnable task after $((run - 1)) runs"
     break
   fi
 
@@ -659,15 +685,25 @@ or stop after ${GOAL_MAX_TURNS} turns"
     *)         STALL_STREAK=0 ;;
   esac
 
-  # --- guards: escalate + stop if the loop is stuck -----------------------
+  # --- guards: escalate + pause the stuck task, keep the loop alive -------
+  # The escalation quotes the task line (`> $TASK`), so while the decision is open next_task
+  # skips it (paused_tasks above) — the quota stops burning on THIS task without holding the
+  # rest of the backlog hostage. Streaks reset because the next iteration works a different
+  # task. A cascade unit has no "next task" (this process IS the unit) — it stops; the
+  # dispatcher moves on to other units.
   if [ "$SAME_COUNT" -ge "$LOOPGUARD_MAX_IDENTICAL" ]; then
     escalate "LoopGuard tripped after $SAME_COUNT identical iterations" \
 "The loop produced the identical task+diff signature (${SIG:0:12}) for $SAME_COUNT consecutive iterations on:
 > $TASK
 
-A-B-A-B / stuck-repeat: Claude keeps generating the same change with no forward progress (often a change the gate keeps rejecting). Halted so it stops burning the quota window."
-    echo "[loop] LoopGuard tripped after $SAME_COUNT identical iterations — stopping."
-    break
+A-B-A-B / stuck-repeat: Claude keeps generating the same change with no forward progress (often a change the gate keeps rejecting). Task paused until the decision is answered."
+    if [ -n "${CASCADE_TASK:-}" ]; then
+      echo "[loop] LoopGuard tripped after $SAME_COUNT identical iterations — stopping (cascade unit)."
+      break
+    fi
+    echo "[loop] LoopGuard tripped after $SAME_COUNT identical iterations — task paused, moving on."
+    PREV_SIG=""; SAME_COUNT=0; STALL_STREAK=0
+    continue
   fi
 
   if [ "$STALL_STREAK" -ge "$STALL_MAX" ]; then
@@ -675,9 +711,14 @@ A-B-A-B / stuck-repeat: Claude keeps generating the same change with no forward 
 "$STALL_STREAK consecutive iterations produced no commit and no persisted NOTES.md change on:
 > $TASK
 
-The loop is neither shipping code nor recording why. Likely the task is blocked, underspecified, or claude is erroring/timing out before doing useful work."
-    echo "[loop] stall detected after $STALL_STREAK runs — stopping."
-    break
+The loop is neither shipping code nor recording why. Likely the task is blocked, underspecified, or claude is erroring/timing out before doing useful work. Task paused until the decision is answered."
+    if [ -n "${CASCADE_TASK:-}" ]; then
+      echo "[loop] stall detected after $STALL_STREAK runs — stopping (cascade unit)."
+      break
+    fi
+    echo "[loop] stall detected after $STALL_STREAK runs — task paused, moving on."
+    PREV_SIG=""; SAME_COUNT=0; STALL_STREAK=0
+    continue
   fi
 done
 

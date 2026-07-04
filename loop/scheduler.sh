@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# scheduler.sh — quota scheduler v1 (ARCHITECTURE.md principle 2: idle quota is waste).
+# scheduler.sh — quota scheduler v1 (ARCHITECTURE.md principle 4: idle quota is waste).
 #
 # Two billing regimes, switched by BILLING_CUTOVER (default 2026-06-15 — the date headless
 # `claude -p` / the Agent SDK stops drawing the interactive ~5h windows and starts drawing a
-# SEPARATE monthly credit, $100/mo on Max 5x; re-verified against docs 2026-06-06, ARCHITECTURE
-# "Billing facts"). The binding constraint flips with it, so the scheduler does too:
+# SEPARATE monthly credit, $100/mo on Max 5x; re-verified against provider docs 2026-06-06).
+# The binding constraint flips with it, so the scheduler does too:
 #
 #   WINDOW mode (before the cutover — pre-June-15 compat, the v0 behavior, unchanged):
 #     PROBE  -> OK: burst · CAPPED: sleep until the reset epoch · ERROR: retry/give up.
@@ -23,9 +23,11 @@
 #     "limit reached|<epoch>" parse is UNVERIFIED for this new billing path (it was guessed for
 #     the window path too), so the first real cap event is captured for a human to confirm/fix.
 #
-# Both modes: a burst that escalated (new D-NNN) STOPS the scheduler (a guard tripped; restarting
-# would burn quota on a stuck task). While capped/paced, local-tier work (refresh REPORT.md via
-# local/digest.sh) runs once per event. Stops on: backlog empty · escalation during a burst ·
+# Both modes: a burst that escalated (new D-NNN) does NOT stop the scheduler — the loop pauses
+# the stuck task itself (run.sh skips tasks quoted in an open decision), so the next burst works
+# the rest of the backlog; the operator is notified, never a blocker. While capped/paced,
+# local-tier work (refresh REPORT.md via local/digest.sh) runs once per event. Stops on: no
+# runnable task (backlog empty, or every open task paused by an open decision) ·
 # MAX_WALL_MINUTES · PROBE_ERR_MAX consecutive probe errors. flock prevents a second scheduler;
 # an already-running loop/run.sh is waited out, never raced.
 #
@@ -190,7 +192,26 @@ notify() {
   curl -s -o /dev/null --max-time 10 -d "$1" "https://ntfy.sh/${NTFY_TOPIC}" || true
 }
 
-have_task() { grep -qm1 '^- \[ \]' backlog.md 2>/dev/null; }
+# A task quoted (`> - [ ] …`) in an OPEN (blank **Answer:**) D-entry is PAUSED — run.sh's
+# next_task skips it, so bursting on a backlog of only-paused tasks would just burn probes.
+# Same awk convention as loop/run.sh paused_tasks / local/decide.sh open_decisions.
+paused_tasks() {
+  awk '
+    function flush() { if (id != "" && ans !~ /[^[:space:]]/) printf "%s", buf; id=""; ans=""; inans=0; buf="" }
+    /^## D-[0-9]+ / { flush(); id=$2; next }
+    id == ""             { next }
+    /^---[[:space:]]*$/  { flush(); next }
+    /^\*\*Answer:\*\*/ { inans=1; t=$0; sub(/^\*\*Answer:\*\*/, "", t); ans=ans t; next }
+    inans { ans = ans $0; next }
+    /^> - \[ \] / { l=$0; sub(/^> /, "", l); buf = buf l "\n" }
+    END { flush() }
+  ' director/DECISIONS.md 2>/dev/null || true
+}
+
+# Runnable = an open backlog task that is not paused by an open decision.
+have_task() {
+  grep '^- \[ \]' backlog.md 2>/dev/null | grep -vxF -f <(paused_tasks) | grep -qm1 .
+}
 
 decisions_count() { grep -c '^## D-' director/DECISIONS.md 2>/dev/null || true; }
 
@@ -271,8 +292,8 @@ main_run() {
       break
     fi
     if ! have_task; then
-      log "backlog empty — stopping."
-      notify "agency scheduler: backlog empty, stopping"
+      log "no runnable task (backlog empty or all open tasks paused) — stopping."
+      notify "agency scheduler: no runnable task, stopping"
       break
     fi
     # Match only real interpreter invocations (`bash …/loop/run.sh`), not any cmdline that
@@ -333,9 +354,10 @@ main_run() {
         rm -f "$burst_cost_file"
         d_after="$(decisions_count)"
         if [ "${d_after:-0}" -gt "${d_before:-0}" ]; then
-          log "burst escalated a decision (D count $d_before -> $d_after) — stopping."
-          notify "agency scheduler: loop escalated during burst — scheduler stopped"
-          break
+          # The loop already paused the stuck task (open decision => run.sh skips it), so the
+          # next burst works the rest of the backlog. Notify the director; never stop for them.
+          log "burst escalated a decision (D count $d_before -> $d_after) — task paused, continuing."
+          notify "agency scheduler: loop escalated during burst — task paused, awaiting director"
         fi
         sleep "$BURST_PAUSE_SECS"
         ;;
