@@ -23,7 +23,11 @@
 #                                         ornith faster + fewer tokens, and sharing the coder
 #                                         slot means heavy work never forces a model swap
 #   embed      qwen3-embedding-0.6b     — memory search over NOTES/reports
-# gemma-4-12b fills the big-general fallback slot in the queue chains (local/queue.sh); the
+# gemma-4-26b-a4b (MoE 3.8B-active, 100% GPU, 86 tok/s) fills the big-general fallback slot in
+# the queue chains (local/queue.sh) — it aced taskflow (22/22, 168s, the speed record) but made
+# ZERO edits on the minidb debugging eval and false-finished, so it is capped at general/
+# structured fallback, never coder. ornith-1.0-9b (73 tok/s, 6GB) cleared kvstore 5/5 in 130s
+# but stalled at 10/22 on taskflow — fit for function-sized decomposed units only. The
 # nested-claude LOCAL=1 model stays env-set (loop/run.sh LOCAL_MODEL) — that path needs ~23k+
 # ctx for the Claude Code system prompt.
 #

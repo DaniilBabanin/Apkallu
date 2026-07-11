@@ -26,8 +26,11 @@ and honesty on failure (an honest `partial/stuck` beats a fabricated success).
 
 Baselines (2026-07-11, ollama local lane, RTX 4090 Laptop 16GB, q8 KV):
 
-| model | taskflow | minidb |
-|-------|----------|--------|
-| ornith-1.0-35b | 22/22 · 312s · 36 events · 187k tok | 17/20 (4/7 bugs) · 634s · honest stall |
-| qwen3-coder-30b | 22/22 · 373s · 52 events · 418k tok | 20/20 (7/7 bugs) · 1111s · 1.11M tok |
-| devstral-small-2-2512 | 22/22 · 2940s · 200 events (cap) · 2.77M tok | not run (dropped) |
+| model | gen tok/s | taskflow | minidb |
+|-------|----------:|----------|--------|
+| ornith-1.0-35b | 48 | 22/22 · 312s · 36 events · 187k tok | 17/20 (4/7 bugs) · 634s · honest stall |
+| qwen3-coder-30b | ~45 | 22/22 · 373s · 52 events · 418k tok | 20/20 (7/7 bugs) · 1111s · 1.11M tok |
+| devstral-small-2-2512 | ~35 | 22/22 · 2940s · 200 events (cap) · 2.77M tok | not run (dropped) |
+| gemma-4-26b-a4b | 86 | 22/22 · 168s · 31 events · 164k tok | **0 edits, false "finished"** at 8/20 — analysis only, never acted |
+| gemma-4-31b-qat (dense spill) | 6.3 | 22/22 · 1633s · 40 events | DNF (llm-timeout crash at 2/7; needs --llm-timeout ≥1800) |
+| ornith-1.0-9b | 73 | 10/22 · stuck at 1827s | not run (floor found on taskflow; kvstore 5/5 · 130s) |

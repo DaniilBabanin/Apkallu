@@ -41,8 +41,8 @@
 #                qwen3-coder-30b first for bugfix-class dispatches. devstral dropped: taskflow
 #                22/22 but 15x ornith's tokens, 9.4x wall clock, hit the iteration cap)
 #   codegen    → qwen3-coder-next > ornith-1.0-35b     (pure code gen, no tools)
-#   structured → qwen3-coder-30b > gemma-4-12b
-#   heavy      → ornith-1.0-35b > qwen3.6-35b-a3b > gemma-4-12b   (shares the coder slot: no swap)
+#   structured → qwen3-coder-30b > gemma-4-26b-a4b
+#   heavy      → ornith-1.0-35b > qwen3.6-35b-a3b > gemma-4-26b-a4b   (shares the coder slot: no swap)
 #
 # Env:
 #   QUEUE_FILE        queue path (default local/queue.ndjson)
@@ -73,8 +73,8 @@ class_models() { # class_models <class> -> comma list, best first
     general)     echo "google/gemma-4-e4b" ;;
     coder)       echo "ornith-1.0-35b,qwen/qwen3-coder-30b" ;;
     codegen)     echo "qwen/qwen3-coder-next,ornith-1.0-35b" ;;
-    structured)  echo "qwen/qwen3-coder-30b,google/gemma-4-12b" ;;
-    heavy)       echo "ornith-1.0-35b,qwen/qwen3.6-35b-a3b,google/gemma-4-12b" ;;
+    structured)  echo "qwen/qwen3-coder-30b,google/gemma-4-26b-a4b" ;;
+    heavy)       echo "ornith-1.0-35b,qwen/qwen3.6-35b-a3b,google/gemma-4-26b-a4b" ;;
     *) return 1 ;;
   esac
 }
