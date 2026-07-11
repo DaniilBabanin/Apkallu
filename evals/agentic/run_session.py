@@ -161,6 +161,8 @@ def main():
     ap.add_argument("--verify-timeout", type=int, default=120,
                     help="seconds for --verify-cmd (a full test gate can take many minutes)")
     ap.add_argument("--timeout", type=int, default=1800, help="in-VM session wall-clock seconds")
+    ap.add_argument("--llm-timeout", type=int, default=600,
+                    help="per-LLM-request seconds inside the session; raise for slow spilled models")
     ap.add_argument("--max-iterations", type=int, default=200)
     ap.add_argument("--name", default="sess")
     ap.add_argument("--keep", action="store_true")
@@ -235,7 +237,8 @@ def main():
         remote = (f"OPENHANDS_SUPPRESS_BANNER=1 /opt/openhands/bin/python /tmp/session_agent.py "
                   f"{llm_flags} --workspace /home/agent/workspace "
                   f"--task-file /tmp/task.md --out /home/agent/out "
-                  f"--timeout {a.timeout} --max-iterations {a.max_iterations}")
+                  f"--timeout {a.timeout} --max-iterations {a.max_iterations} "
+                  f"--llm-timeout {a.llm_timeout}")
         cmd = ["ssh", *vm.SSH_OPTS, "-R", f"{llm_port}:127.0.0.1:{llm_port}", f"{vm.SSH_USER}@{ip}", remote]
         host_timeout = a.timeout + 180       # in-VM alarm should fire first; this is the hard backstop
         print(f"[run_session] running session (in-VM timeout {a.timeout}s, host backstop {host_timeout}s)")

@@ -87,6 +87,9 @@ def main():
     ap.add_argument("--task-file", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--timeout", type=int, default=1800)
+    ap.add_argument("--llm-timeout", type=int, default=600,
+                    help="per-LLM-request timeout seconds; raise for slow spilled models "
+                         "(a 4k-token turn at 6 tok/s is ~11 min)")
     ap.add_argument("--max-iterations", type=int, default=200)
     ap.add_argument("--checkpoint-every", type=int, default=5)
     a = ap.parse_args()
@@ -99,7 +102,8 @@ def main():
     register_default_tools()
     base_url = a.base_url or f"http://127.0.0.1:{a.port}/openai/v1"
     llm = LLM(model=f"openai/{a.model}", base_url=base_url,
-              api_key=a.api_key, usage_id="session", temperature=0.0, num_retries=3)
+              api_key=a.api_key, usage_id="session", temperature=0.0, num_retries=3,
+              timeout=a.llm_timeout)
     agent = Agent(
         llm=llm,
         tools=[Tool(name="terminal"), Tool(name="file_editor")],
