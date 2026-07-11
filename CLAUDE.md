@@ -52,6 +52,10 @@ Responses that fail this format are rejected by review.
 - Architecture, vision, and operator-owned state files are read-only: read them, never edit.
 - Never create suffixed variants (file_v2, file_fix) — modify the original. Delete temp files when done.
 - No new files at the repo root; no unrequested docs or READMEs. (Working in dedicated subdirs is fine.)
+- `evals/agentic/examples/` is benchmark material. Do NOT read those task repos — and NEVER
+  `examples/solutions/` (reference answers + grading keys) — unless the task at hand is explicitly
+  to run, grade, or maintain these benchmarks. Solutions in context contaminate every later
+  comparison; ordinary work never needs them.
 
 ## Process
 

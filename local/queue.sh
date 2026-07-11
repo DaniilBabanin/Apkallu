@@ -40,7 +40,9 @@
 #                planted-bugs 7/7 in 1111s where ornith stalled honestly at 4/7 (634s). Prefer
 #                qwen3-coder-30b first for bugfix-class dispatches. devstral dropped: taskflow
 #                22/22 but 15x ornith's tokens, 9.4x wall clock, hit the iteration cap)
-#   codegen    → qwen3-coder-next > ornith-1.0-35b     (pure code gen, no tools)
+#   codegen    → qwen3-coder-next > ornith-1.0-35b     (pure code gen, no tools; validated
+#                2026-07-11: 2/2 exec-graded one-shots at ~90 tok each vs ornith's 1-4k
+#                reasoning burn on the same tasks — keep the terse model first here)
 #   structured → qwen3-coder-30b > gemma-4-26b-a4b
 #   heavy      → ornith-1.0-35b > qwen3.6-35b-a3b > gemma-4-26b-a4b   (shares the coder slot: no swap)
 #
