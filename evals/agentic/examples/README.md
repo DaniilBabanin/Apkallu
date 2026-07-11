@@ -1,5 +1,30 @@
 # Coding-model benchmarks
 
+## Benchmarking a new model — the runbook
+
+1. **Get the GGUF.** Download in LM Studio (or anywhere), then import without duplicating
+   weights: `./local/ollama-import.sh <path/to.gguf> <name> 32768`. Pin the largest ctx any
+   role needs (agentic sessions require ≥16k; 32k is the standard pin).
+2. **Throughput first** (~1 min, saves wasted VM hours):
+   `python3 evals/agentic/bench_tps.py http://127.0.0.1:11434/v1 <name> <label>`.
+   Steady-state generation <~15 tok/s → interactive lanes are out; it can still run the ladder
+   as an overnight candidate — pass `--llm-timeout 1800` (or more) to run_session.py or single
+   slow turns will kill the session.
+3. **The ladder, in order, stop early when a rung fails:**
+   - weak/small model? floor-check on `kvstore` first (5-feature single module, minutes)
+   - `taskflow` — greenfield multi-module build. Fails here → not a coder; stop.
+   - `minidb` — debugging/persistence separator. Only meaningful after taskflow passes.
+4. **Non-coder roles** (triage/general/structured/codegen): `python3 local/spotcheck.py`
+   (optionally one section: `local/spotcheck.py triage`). Codegen tests every model in the
+   queue's codegen chain automatically.
+5. **Record and decide.** Add a row to the baselines table below (score, wall time, events,
+   prompt tokens from the run's `result.json`, diff shape, honesty). Only then touch the
+   bindings: role map in `local/llm.sh`, chains in `local/queue.sh` (update
+   `tests/queue_test.sh` expectations if chain *structure* changes; run it).
+   Judging rule: token worth beats tok/s — prefer the bigger/stronger model while it stays
+   reasonably fast for its lane; break quality ties on efficiency. Speed alone never earns a
+   binding (see gemma-4-26b-a4b below: fastest model, failed minidb by never editing a file).
+
 Reproducible tasks for comparing models on the VM lane. Each directory is a self-contained
 task repo (`--repo` ships it to the VM); the agent's goal and rules are in its `README.md`,
 and the acceptance suite is the objective gate. `solutions/` holds the reference
