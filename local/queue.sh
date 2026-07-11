@@ -34,7 +34,12 @@
 # for your own models, roles per policy/routing.md role map):
 #   triage     → nemotron-4b                                  (warm; TRUSTED INPUT ONLY)
 #   general    → gemma-4-e4b                                  (warm)
-#   coder      → ornith-1.0-35b > qwen3-coder-30b > devstral-small-2
+#   coder      → ornith-1.0-35b > qwen3-coder-30b   (2026-07-11 VM evals: ornith is the
+#                efficiency pick on well-specified builds — taskflow 22/22 in 312s/36 events vs
+#                qwen's 373s/52; qwen is the persistence pick on gnarly debugging — minidb
+#                planted-bugs 7/7 in 1111s where ornith stalled honestly at 4/7 (634s). Prefer
+#                qwen3-coder-30b first for bugfix-class dispatches. devstral dropped: taskflow
+#                22/22 but 15x ornith's tokens, 9.4x wall clock, hit the iteration cap)
 #   codegen    → qwen3-coder-next > ornith-1.0-35b     (pure code gen, no tools)
 #   structured → qwen3-coder-30b > gemma-4-12b
 #   heavy      → ornith-1.0-35b > qwen3.6-35b-a3b > gemma-4-12b   (shares the coder slot: no swap)
@@ -66,7 +71,7 @@ class_models() { # class_models <class> -> comma list, best first
   case "$1" in
     triage)      echo "nvidia/nemotron-3-nano-4b" ;;
     general)     echo "google/gemma-4-e4b" ;;
-    coder)       echo "ornith-1.0-35b,qwen/qwen3-coder-30b,mistralai/devstral-small-2-2512" ;;
+    coder)       echo "ornith-1.0-35b,qwen/qwen3-coder-30b" ;;
     codegen)     echo "qwen/qwen3-coder-next,ornith-1.0-35b" ;;
     structured)  echo "qwen/qwen3-coder-30b,google/gemma-4-12b" ;;
     heavy)       echo "ornith-1.0-35b,qwen/qwen3.6-35b-a3b,google/gemma-4-12b" ;;
