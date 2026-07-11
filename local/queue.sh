@@ -5,7 +5,7 @@
 # MODEL AFFINITY instead:
 #   §5.1  tasks carry a capability CLASS → ordered acceptable-model list (best first),
 #         never a single hard pin
-#   §5.2  the currently-loaded big-MoE model is read from `lms ps` (server state)
+#   §5.2  the currently-loaded big-MoE model is read from ollama /api/ps (server state)
 #   §5.3  prefer queued work whose acceptable set includes the loaded model
 #   §5.4  switch the big slot only when it has NO acceptable work left, or a
 #         high-priority task (prio >= QUEUE_FORCE_PRIO) forces its first choice;
@@ -30,45 +30,46 @@
 #   ./local/queue.sh drain [max]          # run until empty (or max tasks)
 #   ./local/queue.sh status | classes
 #
-# Classes (from the 2026-06-07 golden suite, policy/routing.md role map):
+# Classes (operator loadout — 2026-06-07 golden suite + 2026-07-11 VM evals; swap slugs
+# for your own models, roles per policy/routing.md role map):
 #   triage     → nemotron-4b                                  (warm; TRUSTED INPUT ONLY)
 #   general    → gemma-4-e4b                                  (warm)
-#   coder      → coder-model > coder-alt-model > general-model
-#   codegen    → codegen-model > coder-model           (pure code gen, no tools)
-#   structured → coder-alt-model > general-model
-#   heavy      → heavy-model > general-model
+#   coder      → ornith-1.0-35b > qwen3-coder-30b > devstral-small-2
+#   codegen    → qwen3-coder-next > ornith-1.0-35b     (pure code gen, no tools)
+#   structured → qwen3-coder-30b > gemma-4-12b
+#   heavy      → ornith-1.0-35b > qwen3.6-35b-a3b > gemma-4-12b   (shares the coder slot: no swap)
 #
 # Env:
 #   QUEUE_FILE        queue path (default local/queue.ndjson)
 #   QUEUE_OUT_DIR     per-task output dir (default local/queue-out)
-#   QUEUE_PS_JSON     test seam: JSON for loaded-model state instead of `lms ps --json`
+#   QUEUE_PS_JSON     test seam: JSON for loaded-model state instead of GET /api/ps
 #   QUEUE_RUN_CMD     test seam: command run instead of the real chat call; gets
 #                     QUEUE_MODEL/QUEUE_CTX/QUEUE_PROMPT env (cascade.sh DECOMPOSE_CMD pattern)
 #   QUEUE_FORCE_PRIO  priority that forces a slot switch (default 9)
 #   QUEUE_LEASE       seconds a "running" claim may live past its claim time when the owner
 #                     pid is gone-unverifiable (default 7200 — the longest sanctioned payload)
-#   LMSTUDIO_BASE     chat endpoint base (default http://localhost:1234/v1)
+#   OLLAMA_BASE       ollama base URL (default http://localhost:11434)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QUEUE_FILE="${QUEUE_FILE:-$HERE/queue.ndjson}"
 LOCK_FILE="$QUEUE_FILE.lock"
 OUT_DIR="${QUEUE_OUT_DIR:-$HERE/queue-out}"
-BASE="${LMSTUDIO_BASE:-http://localhost:1234/v1}"
+BASE="${OLLAMA_BASE:-http://localhost:11434}"
 FORCE_PRIO="${QUEUE_FORCE_PRIO:-9}"
 LEASE="${QUEUE_LEASE:-7200}"
 
-# Keep in sync with local/llm.sh (WARM_LLMS/BIG_SLOT) and policy/routing.md.
+# Keep in sync with local/llm.sh's warmup list and policy/routing.md.
 WARM_SET="nvidia/nemotron-3-nano-4b google/gemma-4-e4b"
 
 class_models() { # class_models <class> -> comma list, best first
   case "$1" in
     triage)      echo "nvidia/nemotron-3-nano-4b" ;;
     general)     echo "google/gemma-4-e4b" ;;
-    coder)       echo "example/coder-model,example/coder-alt-model,example/general-model" ;;
-    codegen)     echo "example/codegen-model,example/coder-model" ;;
-    structured)  echo "example/coder-alt-model,example/general-model" ;;
-    heavy)       echo "example/heavy-model,example/general-model" ;;
+    coder)       echo "ornith-1.0-35b,qwen/qwen3-coder-30b,mistralai/devstral-small-2-2512" ;;
+    codegen)     echo "qwen/qwen3-coder-next,ornith-1.0-35b" ;;
+    structured)  echo "qwen/qwen3-coder-30b,google/gemma-4-12b" ;;
+    heavy)       echo "ornith-1.0-35b,qwen/qwen3.6-35b-a3b,google/gemma-4-12b" ;;
     *) return 1 ;;
   esac
 }
@@ -77,22 +78,23 @@ class_ctx() { # class_ctx <class>
   case "$1" in
     triage) echo 8192 ;;
     general) echo 32768 ;;
+    coder|heavy) echo 32768 ;;   # ornith-first classes: one 32k pin everywhere it loads (fewest swaps)
     *) echo 16384 ;;
   esac
 }
 
 ps_json() { # loaded-model state; QUEUE_PS_JSON overrides for tests
   if [ -n "${QUEUE_PS_JSON:-}" ]; then printf '%s' "$QUEUE_PS_JSON"
-  else lms ps --json 2>/dev/null || echo '[]'
+  else curl -s --max-time 5 "$BASE/api/ps" 2>/dev/null || echo '{"models":[]}'
   fi
 }
 
 loaded_big() { # print the loaded big-slot model id ("" if none)
   local m ids
-  ids="$(ps_json | jq -r '.[] | (.identifier // .modelKey // "")')"
+  ids="$(ps_json | jq -r '.models[]? | ((.name // "") | sub(":latest$"; ""))')"
   while read -r m; do
     [ -z "$m" ] && continue
-    case " $WARM_SET example/embed-model " in
+    case " $WARM_SET text-embedding-qwen3-embedding-0.6b " in
       *" $m "*) continue ;;
     esac
     echo "$m"; return 0
@@ -288,7 +290,7 @@ cmd_run() {
   else
     "$HERE/llm.sh" ensure "$model" "$ctx" || rc=$?
     if [ $rc -eq 0 ]; then
-      curl -s --max-time 600 "$BASE/chat/completions" -H "Content-Type: application/json" \
+      curl -s --max-time 600 "$BASE/v1/chat/completions" -H "Content-Type: application/json" \
         -d "$(jq -n --arg m "$model" --arg p "$payload" \
             '{model:$m, max_tokens:8000, temperature:0.2,
               messages:[{role:"system", content:"Be concise. Output only the final answer, no preamble."},

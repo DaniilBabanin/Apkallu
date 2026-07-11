@@ -88,6 +88,52 @@ by `build-image.sh`.
 - Parallel fanout: `evals/agentic/dispatch.py --jobs jobs.json`
 - The loop: `loop/run.sh` · Status: `status.sh` · TUI: `tui.sh`
 
+## Local models (optional — ollama)
+The local lane (`local/llm.sh` roles, `local/queue.sh`, `run_session.py --local-model`) serves
+open models with **ollama ≥ 0.31** (older builds bundle a llama.cpp too old for newer
+architectures):
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh   # installs + enables the systemd service
+```
+
+The stock service runs as the `ollama` user with a root-owned store. To serve GGUFs symlinked
+from your home (and tune for the hardware), drop an override into
+`/etc/systemd/system/ollama.service.d/override.conf`:
+
+```ini
+[Service]
+User=<you>
+Group=<you>
+Environment="OLLAMA_MODELS=/home/<you>/.cache/ollama-user"
+Environment="OLLAMA_KV_CACHE_TYPE=q8_0"    # halves KV-cache memory
+Environment="OLLAMA_FLASH_ATTENTION=1"
+Environment="OLLAMA_NUM_PARALLEL=1"
+Environment="OLLAMA_MAX_LOADED_MODELS=4"   # warm lane (3 small) + one big model
+Environment="OLLAMA_KEEP_ALIVE=2h"
+```
+
+then `sudo systemctl daemon-reload && sudo systemctl restart ollama`.
+
+Getting models, either way works:
+- `ollama pull <model>` from the ollama registry, or
+- download in **LM Studio** (pleasant catalog/browse UI) and import without duplicating the
+  weights: `./local/ollama-import.sh <path/to.gguf> <name> [num_ctx]` — creates the model, then
+  swaps ollama's blob copy for a symlink to the GGUF. Pin `num_ctx` to the largest context any
+  role needs (agentic sessions need ≥16k; see the role map in `local/llm.sh`). Deleting the
+  model in LM Studio breaks the symlink → loads fail loudly; re-download or `ollama rm`.
+
+Bind models to roles in `local/llm.sh` (role → model case block) and `local/queue.sh`
+(class → acceptable-model chains), then warm the always-on lane and verify:
+
+```bash
+./local/llm.sh warmup
+./local/llm.sh triage "reply ok"
+```
+
+`OLLAMA_BASE` overrides the endpoint (default `http://localhost:11434`); the VM lane's local
+port is `LLM_LOCAL_PORT` (`run_session.py`).
+
 ## Inference
 Provider-agnostic via env vars (see `.env.example`):
 

@@ -20,11 +20,11 @@ check() { # check <desc> <expected> <actual>
 
 reset_q() { rm -f "$QUEUE_FILE"; }
 
-NONE='[]'
-GLM='[{"identifier":"example/coder-alt-model","contextLength":16384}]'
-WARM_GLM='[{"identifier":"google/gemma-4-e4b","contextLength":32768},
-           {"identifier":"nvidia/nemotron-3-nano-4b","contextLength":8192},
-           {"identifier":"example/coder-alt-model","contextLength":16384}]'
+NONE='{"models":[]}'
+QC30='{"models":[{"name":"qwen/qwen3-coder-30b:latest","context_length":16384}]}'
+WARM_QC30='{"models":[{"name":"google/gemma-4-e4b:latest","context_length":32768},
+           {"name":"nvidia/nemotron-3-nano-4b:latest","context_length":8192},
+           {"name":"qwen/qwen3-coder-30b:latest","context_length":16384}]}'
 
 # --- 1. warm lane drains first, independent of big slot (§5.5) ---------------
 reset_q
@@ -35,38 +35,38 @@ check "warm lane first" "t1	nvidia/nemotron-3-nano-4b" "$pick"
 
 # --- 2. affinity drain: task acceptable on loaded model wins (§5.3) ----------
 reset_q
-"$Q" enqueue heavy --prompt "think hard" --id h1 >/dev/null   # first choice example-model
-"$Q" enqueue coder --prompt "fix bug"    --id c1 >/dev/null   # glm is acceptable (2nd)
-pick="$(QUEUE_PS_JSON="$GLM" "$Q" next)"
-check "affinity beats FIFO" "c1	example/coder-alt-model" "$pick"
+"$Q" enqueue heavy --prompt "think hard" --id h1 >/dev/null   # first choice ornith
+"$Q" enqueue coder --prompt "fix bug"    --id c1 >/dev/null   # qwen3-coder-30b acceptable (2nd)
+pick="$(QUEUE_PS_JSON="$QC30" "$Q" next)"
+check "affinity beats FIFO" "c1	qwen/qwen3-coder-30b" "$pick"
 
 # --- 3. drain loaded model fully before any swap (§5.4 first clause) ---------
 reset_q
-"$Q" enqueue structured --prompt "json a" --id s1 >/dev/null  # glm first choice
+"$Q" enqueue structured --prompt "json a" --id s1 >/dev/null  # qwen3-coder-30b first choice
 "$Q" enqueue codegen    --prompt "gen b"  --id g1 >/dev/null  # coder-next first choice
-pick="$(QUEUE_PS_JSON="$GLM" "$Q" next)"
-check "no swap while loaded has work" "s1	example/coder-alt-model" "$pick"
+pick="$(QUEUE_PS_JSON="$QC30" "$Q" next)"
+check "no swap while loaded has work" "s1	qwen/qwen3-coder-30b" "$pick"
 
 # --- 4. swap when loaded has NO acceptable work; amortize by count (§5.4) ----
 reset_q
 "$Q" enqueue structured --prompt "json"  --id s1 >/dev/null   # 1 task for glm
 "$Q" enqueue codegen    --prompt "gen1"  --id g1 >/dev/null   # 2 tasks for coder-next
 "$Q" enqueue codegen    --prompt "gen2"  --id g2 >/dev/null
-pick="$(QUEUE_PS_JSON='[{"identifier":"example/heavy-model","contextLength":16384}]' "$Q" next)"
-check "swap amortized to max-count model" "g1	example/codegen-model" "$pick"
+pick="$(QUEUE_PS_JSON='{"models":[{"name":"qwen/qwen3.6-35b-a3b:latest","context_length":16384}]}' "$Q" next)"
+check "swap amortized to max-count model" "g1	qwen/qwen3-coder-next" "$pick"
 
 # --- 5. high prio forces first choice despite loaded affinity (§5.4) ---------
 reset_q
-"$Q" enqueue coder --prompt "routine"   --id c1 >/dev/null            # glm acceptable
-"$Q" enqueue heavy --prompt "urgent"    --id h1 --prio 9 >/dev/null   # forces example-model
-pick="$(QUEUE_PS_JSON="$GLM" "$Q" next)"
-check "force-prio overrides affinity" "h1	example/heavy-model" "$pick"
+"$Q" enqueue coder --prompt "routine"   --id c1 >/dev/null            # qwen3-coder-30b acceptable
+"$Q" enqueue heavy --prompt "urgent"    --id h1 --prio 9 >/dev/null   # forces ornith
+pick="$(QUEUE_PS_JSON="$QC30" "$Q" next)"
+check "force-prio overrides affinity" "h1	ornith-1.0-35b" "$pick"
 
 # --- 7. warm models in ps don't count as the big slot ------------------------
 reset_q
 "$Q" enqueue coder --prompt "x" --id c1 >/dev/null
-pick="$(QUEUE_PS_JSON="$WARM_GLM" "$Q" next)"
-check "warm lane invisible to big-slot state" "c1	example/coder-alt-model" "$pick"
+pick="$(QUEUE_PS_JSON="$WARM_QC30" "$Q" next)"
+check "warm lane invisible to big-slot state" "c1	qwen/qwen3-coder-30b" "$pick"
 
 # --- 8. run: executes, marks done, writes output (stubbed) -------------------
 reset_q
@@ -106,7 +106,7 @@ fi
 reset_q
 "$Q" enqueue coder --cmd "run me" --models example/general-model --ctx 65536 --id cx1 >/dev/null
 check "--ctx overrides class default" "65536" "$(jq -r 'select(.id=="cx1") | .ctx' "$QUEUE_FILE")"
-check "default ctx still applies without --ctx" "16384" \
+check "default ctx still applies without --ctx" "32768" \
   "$("$Q" enqueue coder --prompt p --id cx2 >/dev/null; jq -r 'select(.id=="cx2") | .ctx' "$QUEUE_FILE")"
 
 # --- 13. submit: enqueue + run NOW + print output + leave no entry (transient) ---------------

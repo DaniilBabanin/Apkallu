@@ -32,6 +32,67 @@ AGENT_PY = os.path.join(HERE, "session_agent.py")
 RESULTS = os.path.join(HERE, "results")
 
 
+MIN_LOCAL_CTX = 16384   # OpenHands' opening prompt alone is ~6k tokens; a model served at a
+                        # small context 400s the first request ("n_keep >= n_ctx")
+
+
+def ensure_local_ctx(model, port):
+    """Local-lane preflight: fail fast (or self-heal) when `model` would serve at a context too
+    small for an agentic session. Ollama: num_ctx is pinned at import — check /api/show, error
+    with the re-import command. LM Studio: check /api/v0/models, reload bigger via `lms`.
+    Other OpenAI-compatible servers: skip — nothing to check."""
+    import re
+    import shutil
+    import urllib.request
+
+    def _get(url, data=None):
+        req = urllib.request.Request(url, data=data,
+                                     headers={"Content-Type": "application/json"} if data else {})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return json.load(r)
+
+    # ollama?
+    try:
+        _get(f"http://127.0.0.1:{port}/api/version")
+    except Exception:
+        pass
+    else:
+        try:
+            info = _get(f"http://127.0.0.1:{port}/api/show",
+                        json.dumps({"model": model}).encode())
+        except Exception:
+            raise SystemExit(f"local model {model!r} not on ollama :{port} — import it: "
+                             f"./local/ollama-import.sh <gguf> {model} 32768")
+        m = re.search(r"num_ctx\s+(\d+)", info.get("parameters") or "")
+        ctx = int(m.group(1)) if m else 0
+        if ctx < MIN_LOCAL_CTX:
+            raise SystemExit(f"{model}: ollama num_ctx pin {ctx or 'unset'} < {MIN_LOCAL_CTX} — "
+                             f"re-import: ./local/ollama-import.sh <gguf> {model} 32768")
+        return
+
+    # LM Studio?
+    try:
+        models = _get(f"http://127.0.0.1:{port}/api/v0/models").get("data", [])
+    except Exception:
+        return
+    m = next((x for x in models if x.get("id") == model), None)
+    if m is None:
+        raise SystemExit(f"local model {model!r} not on server :{port} (see /api/v0/models)")
+    ctx = m.get("loaded_context_length") or 0   # 0 = not loaded → JIT load would use the default
+    if ctx >= MIN_LOCAL_CTX:
+        return
+    target = min(32768, m.get("max_context_length") or 32768)
+    lms = shutil.which("lms") or os.path.expanduser("~/.cache/lm-studio/bin/lms")
+    if not os.path.exists(lms):
+        raise SystemExit(f"{model} loaded_context={ctx} < {MIN_LOCAL_CTX}; "
+                         f"fix: lms load {model} --context-length {target}")
+    print(f"[run_session] {model} loaded_context={ctx} < {MIN_LOCAL_CTX}: reloading at {target}")
+    subprocess.run([lms, "unload", model], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if subprocess.run([lms, "load", model, "--context-length", str(target),
+                       "--ttl", "7200", "-y"]).returncode != 0:
+        raise SystemExit(f"lms load {model} --context-length {target} failed")
+
+
 def ensure_proxy():
     if vm._port_open("127.0.0.1", PORT):
         return None
@@ -97,6 +158,8 @@ def main():
     ap.add_argument("--local-model", help="a local server model slug; run via host a local server over ssh -R "
                     "(local lane, no your provider proxy). Tools still run in the VM sandbox.")
     ap.add_argument("--verify-cmd", help="run in the workspace after the session (informative; not gating)")
+    ap.add_argument("--verify-timeout", type=int, default=120,
+                    help="seconds for --verify-cmd (a full test gate can take many minutes)")
     ap.add_argument("--timeout", type=int, default=1800, help="in-VM session wall-clock seconds")
     ap.add_argument("--max-iterations", type=int, default=200)
     ap.add_argument("--name", default="sess")
@@ -113,7 +176,10 @@ def main():
     if not local and not a.model:
         raise SystemExit("set --model or LLM_MODEL for the remote lane (see .env.example)")
     model = a.local_model if local else a.model
-    llm_port = 1234 if local else PORT
+    # local lane default = ollama; LLM_LOCAL_PORT overrides (e.g. 1234 for LM Studio)
+    llm_port = int(os.environ.get("LLM_LOCAL_PORT", "11434")) if local else PORT
+    if local:
+        ensure_local_ctx(model, llm_port)
 
     repo = os.path.abspath(a.repo.rstrip("/"))
     if not os.path.isdir(repo):
@@ -143,6 +209,8 @@ def main():
         # git scaffold: baseline commit (if needed) + agent-session branch; print baseline SHA.
         scaffold = (
             "set -e; cd ~/workspace; "
+            # image ships python3 only; tasks and --verify-cmd routinely say `python` (exit 127)
+            "command -v python >/dev/null || sudo ln -sf $(command -v python3) /usr/local/bin/python; "
             "git config --global user.email agent@agentic.local; "
             "git config --global user.name 'agentic agent'; "
             "[ -d .git ] || git init -q; "

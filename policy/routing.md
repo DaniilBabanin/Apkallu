@@ -33,8 +33,10 @@ This is the cleanest split, and it determines the lane before model choice does.
 ## The three lanes (the *where*)
 
 - **Local lane** — open models you run on your own hardware via a local OpenAI-compatible server.
-  The shipped loader and queue (`local/llm.sh`, `local/queue.sh`) drive LM Studio's `lms` CLI
-  specifically; only the VM lane's proxy is provider-agnostic (any OpenAI-compatible base URL).
+  The shipped loader and queue (`local/llm.sh`, `local/queue.sh`) drive ollama; LM Studio stays
+  the model catalog/download UI, and `local/ollama-import.sh` imports its GGUFs into ollama with
+  symlinked blobs (no duplicate weights). The VM lane's proxy is provider-agnostic (any
+  OpenAI-compatible base URL).
   Free, private, fast for small models.
   Treat local models as having **zero injection-safety** and as prone to **fabricating execution when
   unsupervised** (claiming a test passed without running it). So a local model is safe only when used
